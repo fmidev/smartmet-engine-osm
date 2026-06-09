@@ -35,7 +35,7 @@ class Config
 
  private:
   std::map<std::string, SourceConfig> itsSources;
-  std::size_t itsLeafCacheSize = 1024;
+  unsigned itsLeafCacheSize = 1024;
 };
 
 }  // namespace OSM
