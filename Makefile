@@ -56,7 +56,7 @@ $(LIBFILE): $(OBJS)
 
 clean:
 	rm -f $(LIBFILE) obj/* *~ $(SUBNAME)/*~
-	$(MAKE) -C test $@
+	if test -f test/Makefile ; then $(MAKE) -C test $@; fi
 
 format:
 	clang-format -i -style=file $(SUBNAME)/*.h $(SUBNAME)/*.cpp
@@ -73,7 +73,7 @@ install:
 	$(INSTALL_PROG) $(LIBFILE) $(enginedir)/$(LIBFILE)
 
 test:
-	cd test && make test
+	if test -f test/Makefile ; then $(MAKE) -C test $@; fi
 
 objdir:
 	@mkdir -p $(objdir)
