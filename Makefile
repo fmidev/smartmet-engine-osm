@@ -2,7 +2,7 @@ SUBNAME = osm
 SPEC = smartmet-engine-$(SUBNAME)
 INCDIR = smartmet/engines/$(SUBNAME)
 
-REQUIRES = configpp zlib
+REQUIRES = configpp
 
 include $(shell echo $${PREFIX-/usr})/share/smartmet/devel/makefile.inc
 
