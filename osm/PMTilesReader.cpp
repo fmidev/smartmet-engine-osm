@@ -14,6 +14,7 @@
 #include <zstd.h>
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 namespace SmartMet
 {
