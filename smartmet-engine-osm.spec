@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.4.2
+Version: 26.8.29
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -75,5 +75,10 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Fri Aug 29 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> 26.8.29-1.fmi
+- Harden PMTiles reader against hostile files: overflow-safe bounds checks on
+  all file-controlled offsets/lengths, capped directory-entry allocation, and a
+  leaf-directory recursion depth limit
+
 * Thu Apr  2 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> 26.4.2-1.fmi
 - Initial release: PMTiles-backed OSM engine

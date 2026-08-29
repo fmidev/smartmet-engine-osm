@@ -13,6 +13,7 @@
 #include <zlib.h>
 #include <zstd.h>
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <mutex>
 
@@ -32,6 +33,29 @@ namespace
 constexpr std::size_t kHeaderSize = 127;
 constexpr std::array<char, 7> kMagic = {'P', 'M', 'T', 'i', 'l', 'e', 's'};
 constexpr uint8_t kSpecVersion = 3;
+
+// Hardening limits against hostile PMTiles files.
+//
+// Maximum number of entries we are willing to allocate for a single directory.
+// PMTiles directories are split so that no single directory grows unbounded; a
+// few hundred thousand entries is already extreme. This cap prevents a crafted
+// varint entry-count from triggering a huge std::vector allocation (DoS) before
+// the (much smaller) input buffer is even consulted.
+constexpr uint64_t kMaxDirectoryEntries = 10'000'000;
+
+// Maximum depth of leaf-directory pointer chasing. The PMTiles spec uses at
+// most a root directory plus one or two levels of leaf directories; a small
+// bound stops a self-referential / cyclic leaf pointer from causing an
+// unbounded loop.
+constexpr int kMaxLeafDepth = 4;
+
+// Overflow-safe range check: is the half-open range [offset, offset+length)
+// fully contained in a buffer of the given size, without the offset+length
+// addition wrapping around? Written so that no intermediate value can overflow.
+inline bool rangeWithin(uint64_t offset, uint64_t length, uint64_t size)
+{
+  return offset <= size && length <= size - offset;
+}
 
 // Read a little-endian uint64 from a byte pointer
 inline uint64_t readU64LE(const std::byte* p)
@@ -233,6 +257,20 @@ PMTilesReader::PMTilesReader(const std::filesystem::path& path) : itsPath(path)
     itsHeader.centerLon = readI32LE(h + 119) / 1e7f;
     itsHeader.centerLat = readI32LE(h + 123) / 1e7f;
 
+    // Validate every file-derived section offset/length against the actual
+    // mapped file size, using overflow-safe arithmetic. This guarantees that
+    // any offset later derived relative to these sections (leaf dirs, tile
+    // data) cannot overflow when added to the section base.
+    if (!rangeWithin(itsHeader.rootDirOffset, itsHeader.rootDirLength, itsFileSize) ||
+        !rangeWithin(itsHeader.metadataOffset, itsHeader.metadataLength, itsFileSize) ||
+        !rangeWithin(itsHeader.leafDirsOffset, itsHeader.leafDirsLength, itsFileSize) ||
+        !rangeWithin(itsHeader.tileDataOffset, itsHeader.tileDataLength, itsFileSize))
+    {
+      ::munmap(const_cast<std::byte*>(itsData), itsFileSize);
+      ::close(itsFd);
+      throw Fmi::Exception(BCP, "PMTiles header section out of file bounds: " + path.string());
+    }
+
     // Decompress and decode root directory into RAM (always kept resident)
     auto rootBytes = decompress(
         itsHeader.rootDirOffset, itsHeader.rootDirLength, itsHeader.internalCompression);
@@ -271,9 +309,14 @@ std::optional<TileData> PMTilesReader::getTile(
     if (!e)
       return {};
 
-    // If run_length == 0, this entry is a pointer into the leaf-dirs section
+    // If run_length == 0, this entry is a pointer into the leaf-dirs section.
+    // Bound the number of leaf levels we follow so that a self-referential or
+    // cyclic leaf pointer in a hostile file cannot spin forever.
+    int depth = 0;
     while (e->runLength == 0)
     {
+      if (++depth > kMaxLeafDepth)
+        throw Fmi::Exception(BCP, "PMTiles: leaf directory recursion limit exceeded");
       const Directory& leaf = getLeafDirectory(e->offset, e->length);
       e = findEntry(leaf, tileId);
       if (!e)
@@ -283,6 +326,13 @@ std::optional<TileData> PMTilesReader::getTile(
     // Verify the tile falls within this run
     if (tileId >= e->tileId + e->runLength)
       return {};
+
+    // The tile bytes live in the tile-data section at [e->offset, e->offset +
+    // e->length). Validate that range against the tile-data section extent with
+    // overflow-safe arithmetic before handing out a raw pointer, so a crafted
+    // directory offset/length cannot produce an out-of-bounds view.
+    if (!rangeWithin(e->offset, e->length, itsHeader.tileDataLength))
+      throw Fmi::Exception(BCP, "PMTiles: tile data region out of bounds");
 
     // All tiles in a run share the same data (deduplication)
     const std::byte* tileBase =
@@ -356,7 +406,9 @@ std::vector<std::byte> PMTilesReader::decompress(uint64_t offset,
                                                   uint64_t length,
                                                   Compression compression) const
 {
-  if (offset + length > itsFileSize)
+  // Overflow-safe bounds check: a naive "offset + length > itsFileSize" can be
+  // bypassed by a crafted length that makes the addition wrap around.
+  if (!rangeWithin(offset, length, itsFileSize))
     throw Fmi::Exception(BCP, "PMTiles: compressed region extends past end of file");
 
   const std::byte* src = itsData + offset;
@@ -398,6 +450,18 @@ Directory PMTilesReader::decodeDirectory(const std::vector<std::byte>& data)
     const std::byte* end = p + data.size();
 
     const uint64_t numEntries = readVarint(p, end);
+
+    // Guard against a hostile entry count triggering a huge allocation before
+    // the (much smaller) input buffer is even consulted. Two independent caps:
+    //  1) an absolute sanity ceiling, and
+    //  2) the physical limit that each entry needs at least one varint byte in
+    //     the first column, so numEntries can never exceed the bytes remaining.
+    if (numEntries > kMaxDirectoryEntries)
+      throw Fmi::Exception(BCP, "PMTiles: directory entry count exceeds limit")
+          .addParameter("num_entries", std::to_string(numEntries));
+    if (numEntries > static_cast<uint64_t>(end - p))
+      throw Fmi::Exception(BCP, "PMTiles: directory entry count exceeds available data");
+
     Directory dir;
     dir.resize(numEntries);
 
@@ -473,6 +537,14 @@ const Directory& PMTilesReader::getLeafDirectory(uint64_t offset, uint32_t lengt
       if (it != itsLeafCache.end())
         return it->second;
     }
+
+    // Validate the leaf-directory region against the leaf-dirs section extent
+    // using overflow-safe arithmetic BEFORE computing the absolute file offset.
+    // Since the leaf-dirs section was itself bounds-checked at construction,
+    // this guarantees leafDirsOffset + offset cannot overflow and the resulting
+    // absolute region stays inside the mapped file.
+    if (!rangeWithin(offset, length, itsHeader.leafDirsLength))
+      throw Fmi::Exception(BCP, "PMTiles: leaf directory region out of bounds");
 
     // Not in cache — decompress and insert with exclusive lock
     auto leafBytes =
