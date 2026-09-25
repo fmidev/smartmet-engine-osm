@@ -6,6 +6,10 @@ Part of [SmartMet Server](https://github.com/fmidev/smartmet-server). See the [S
 
 The OSM engine provides access to OpenStreetMap geographic data for SmartMet Server. It enables plugins to query OSM data for use in map products and location-based services.
 
+## Documentation
+
+- [Developer guide](docs/developer-guide.md) — API, tile lookup, configuration, pitfalls
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
