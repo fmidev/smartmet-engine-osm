@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.8.29
+Version: 26.9.30
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -27,13 +27,13 @@ BuildRequires: %{smartmet_boost}-devel
 BuildRequires: smartmet-library-spine-devel >= 26.4.2
 BuildRequires: smartmet-library-macgyver-devel >= 26.4.2
 BuildRequires: smartmet-utils-devel >= 26.4.2
-BuildRequires: libconfig-devel
+BuildRequires: libconfig17-devel
 BuildRequires: zlib-devel
 BuildRequires: libzstd-devel
 Requires: %{smartmet_boost}-thread
 Requires: smartmet-library-spine >= 26.4.2
 Requires: smartmet-library-macgyver >= 26.4.2
-Requires: libconfig
+Requires: libconfig17
 Requires: zlib
 Requires: libzstd
 Provides: %{SPECNAME}
@@ -75,6 +75,8 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Wed Sep 30 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> 26.9.30-1.fmi
+- Use libconfig17 instead of libconfig17
 * Fri Aug 29 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> 26.8.29-1.fmi
 - Harden PMTiles reader against hostile files: overflow-safe bounds checks on
   all file-controlled offsets/lengths, capped directory-entry allocation, and a
