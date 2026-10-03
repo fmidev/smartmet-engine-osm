@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 smartmet-engine-osm is a SmartMet Server engine that provides zero-copy, memory-mapped access to PMTiles v3 files containing pre-tiled OpenStreetMap vector data. It is used by the Dali WMS plugin for vector tile rendering of OSM map layers.
 
+Full developer documentation: `docs/developer-guide.md`.
+
 ## Build commands
 
 ```bash
