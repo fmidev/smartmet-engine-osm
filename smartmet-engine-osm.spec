@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.9.30
+Version: 26.10.14
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -24,14 +24,14 @@ BuildRequires: rpm-build
 BuildRequires: gcc-c++
 BuildRequires: make
 BuildRequires: %{smartmet_boost}-devel
-BuildRequires: smartmet-library-spine-devel >= 26.4.2
+BuildRequires: smartmet-library-spine-devel >= 26.10.13
 BuildRequires: smartmet-library-macgyver-devel >= 26.4.2
 BuildRequires: smartmet-utils-devel >= 26.4.2
 BuildRequires: libconfig17-devel
 BuildRequires: zlib-devel
 BuildRequires: libzstd-devel
 Requires: %{smartmet_boost}-thread
-Requires: smartmet-library-spine >= 26.4.2
+Requires: smartmet-library-spine >= 26.10.13
 Requires: smartmet-library-macgyver >= 26.4.2
 Requires: libconfig17
 Requires: zlib
@@ -47,7 +47,7 @@ Summary: SmartMet %{SPECNAME} development headers
 Group: SmartMet/Development
 Provides: %{SPECNAME}-devel
 Requires: %{SPECNAME} = %{version}-%{release}
-Requires: smartmet-library-spine-devel >= 26.4.2
+Requires: smartmet-library-spine-devel >= 26.10.13
 Requires: smartmet-library-macgyver-devel >= 26.4.2
 %description -n %{SPECNAME}-devel
 SmartMet %{SPECNAME} development headers.
@@ -75,6 +75,10 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Wed Oct 14 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.14-1.fmi
+- Fixed clang-tidy style findings (loops, nested conditionals, dead code)
+- Requires 26.10.13 versions of spine due to their ABI changes
+
 * Wed Sep 30 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> 26.9.30-1.fmi
 - Use libconfig17 instead of libconfig17
 * Fri Aug 29 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> 26.8.29-1.fmi

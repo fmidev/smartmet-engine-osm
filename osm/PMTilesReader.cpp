@@ -249,13 +249,13 @@ PMTilesReader::PMTilesReader(const std::filesystem::path& path) : itsPath(path)
     itsHeader.tileType = static_cast<TileType>(h[99]);
     itsHeader.minZoom = static_cast<uint8_t>(h[100]);
     itsHeader.maxZoom = static_cast<uint8_t>(h[101]);
-    itsHeader.minLon = readI32LE(h + 102) / 1e7f;
-    itsHeader.minLat = readI32LE(h + 106) / 1e7f;
-    itsHeader.maxLon = readI32LE(h + 110) / 1e7f;
-    itsHeader.maxLat = readI32LE(h + 114) / 1e7f;
+    itsHeader.minLon = readI32LE(h + 102) / 1e7F;
+    itsHeader.minLat = readI32LE(h + 106) / 1e7F;
+    itsHeader.maxLon = readI32LE(h + 110) / 1e7F;
+    itsHeader.maxLat = readI32LE(h + 114) / 1e7F;
     itsHeader.centerZoom = static_cast<uint8_t>(h[118]);
-    itsHeader.centerLon = readI32LE(h + 119) / 1e7f;
-    itsHeader.centerLat = readI32LE(h + 123) / 1e7f;
+    itsHeader.centerLon = readI32LE(h + 119) / 1e7F;
+    itsHeader.centerLat = readI32LE(h + 123) / 1e7F;
 
     // Validate every file-derived section offset/length against the actual
     // mapped file size, using overflow-safe arithmetic. This guarantees that
@@ -366,9 +366,9 @@ uint64_t PMTilesReader::xy2d(uint32_t n, uint32_t x, uint32_t y)
   uint64_t d = 0;
   for (uint32_t s = n / 2; s > 0; s /= 2)
   {
-    uint32_t rx = (x & s) > 0 ? 1u : 0u;
-    uint32_t ry = (y & s) > 0 ? 1u : 0u;
-    d += static_cast<uint64_t>(s) * s * ((3u * rx) ^ ry);
+    uint32_t rx = (x & s) > 0 ? 1U : 0U;
+    uint32_t ry = (y & s) > 0 ? 1U : 0U;
+    d += static_cast<uint64_t>(s) * s * ((3U * rx) ^ ry);
     // Rotate the quadrant
     if (ry == 0)
     {
@@ -512,8 +512,8 @@ uint64_t PMTilesReader::readVarint(const std::byte*& p, const std::byte* end)
   while (p < end)
   {
     uint8_t byte = static_cast<uint8_t>(*p++);
-    result |= static_cast<uint64_t>(byte & 0x7Fu) << shift;
-    if (!(byte & 0x80u))
+    result |= static_cast<uint64_t>(byte & 0x7FU) << shift;
+    if (!(byte & 0x80U))
       return result;
     shift += 7;
     if (shift >= 64)
