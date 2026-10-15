@@ -532,7 +532,7 @@ const Directory& PMTilesReader::getLeafDirectory(uint64_t offset, uint32_t lengt
   {
     // Check cache with shared (read) lock first
     {
-      std::shared_lock lock(itsLeafMutex);
+      std::shared_lock<std::shared_mutex> lock(itsLeafMutex);
       auto it = itsLeafCache.find(offset);
       if (it != itsLeafCache.end())
         return it->second;
@@ -551,7 +551,7 @@ const Directory& PMTilesReader::getLeafDirectory(uint64_t offset, uint32_t lengt
         decompress(itsHeader.leafDirsOffset + offset, length, itsHeader.internalCompression);
     Directory leafDir = decodeDirectory(leafBytes);
 
-    std::unique_lock lock(itsLeafMutex);
+    std::unique_lock<std::shared_mutex> lock(itsLeafMutex);
     // Double-check after acquiring exclusive lock
     auto [it, inserted] = itsLeafCache.emplace(offset, std::move(leafDir));
     return it->second;
