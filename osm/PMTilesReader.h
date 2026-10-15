@@ -176,7 +176,7 @@ class PMTilesReader
   std::size_t itsFileSize = 0;
 
   // ---- parsed state ----
-  PMTilesHeader itsHeader;
+  PMTilesHeader itsHeader{};
   Directory itsRootDirectory;  // always resident (small, max ~512 KB)
 
   // ---- leaf directory cache ----

@@ -53,6 +53,7 @@ class Engine : public SmartMet::Spine::SmartMetEngine
   Engine& operator=(const Engine&) = delete;
   Engine(Engine&&) = delete;
   Engine& operator=(Engine&&) = delete;
+  ~Engine() override = default;
 
   // Return a zero-copy view of the raw tile bytes from the mmap'd file.
   // The returned TileData points into the memory-mapped region; the caller
