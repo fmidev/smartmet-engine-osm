@@ -16,13 +16,13 @@
 
 #pragma once
 
+#include <macgyver/Cache.h>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
-#include <shared_mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace SmartMet
@@ -104,6 +104,7 @@ struct Entry
 };
 
 using Directory = std::vector<Entry>;
+using DirectoryPtr = std::shared_ptr<const Directory>;
 
 // ======================================================================
 //  Zero-copy view into the mmap'd tile data (C++17 compatible span substitute)
@@ -124,7 +125,9 @@ struct TileData
 class PMTilesReader
 {
  public:
-  explicit PMTilesReader(const std::filesystem::path& path);
+  // The leaf cache size is the number of decoded leaf directories kept in memory.
+  // A planet file has a few thousand leaves of roughly 1.5 MB each when decoded.
+  explicit PMTilesReader(const std::filesystem::path& path, std::size_t leafCacheSize = 256);
   ~PMTilesReader();
 
   PMTilesReader(const PMTilesReader&) = delete;
@@ -137,7 +140,24 @@ class PMTilesReader
   // the tile does not exist in this file.
   std::optional<TileData> getTile(uint8_t z, uint32_t x, uint32_t y) const;
 
+  // Return the tile bytes decompressed according to the tile compression of the
+  // file. Returns std::nullopt if the tile does not exist in this file.
+  std::optional<std::string> getDecompressedTile(uint8_t z, uint32_t x, uint32_t y) const;
+
+  // Decompress tile bytes obtained from getTile()
+  std::string decompressTile(const TileData& tile) const;
+
+  // The JSON metadata section (decompressed), empty if there is none
+  std::string metadata() const;
+
   const PMTilesHeader& header() const { return itsHeader; }
+
+  // Unique id of this reader instance, used in cache keys. A file replaced on
+  // disk is opened by a new reader with a new id.
+  std::uint64_t id() const { return itsId; }
+
+  // Convert tile coordinates to the PMTiles Hilbert-curve tile_id
+  static uint64_t tileToId(uint8_t z, uint32_t x, uint32_t y);
 
   // Modification time of the source file (seconds since epoch)
   std::int64_t fileTimestamp() const;
@@ -145,9 +165,6 @@ class PMTilesReader
   const std::filesystem::path& path() const { return itsPath; }
 
  private:
-  // Convert tile coordinates to PMTiles Hilbert-curve tile_id
-  static uint64_t tileToId(uint8_t z, uint32_t x, uint32_t y);
-
   // Hilbert-curve d = xy2d(n, x, y)
   static uint64_t xy2d(uint32_t n, uint32_t x, uint32_t y);
 
@@ -163,8 +180,9 @@ class PMTilesReader
   static uint64_t readVarint(const std::byte*& p, const std::byte* end);
 
   // Fetch (and cache) the leaf directory at the given offset within the
-  // leaf-dirs section. Thread-safe.
-  const Directory& getLeafDirectory(uint64_t offset, uint32_t length) const;
+  // leaf-dirs section. Thread-safe. The returned pointer stays valid even if
+  // the directory is evicted from the cache meanwhile.
+  DirectoryPtr getLeafDirectory(uint64_t offset, uint32_t length) const;
 
   // Binary search for tileId in a sorted directory
   static const Entry* findEntry(const Directory& dir, uint64_t tileId);
@@ -179,9 +197,10 @@ class PMTilesReader
   PMTilesHeader itsHeader{};
   Directory itsRootDirectory;  // always resident (small, max ~512 KB)
 
-  // ---- leaf directory cache ----
-  mutable std::shared_mutex itsLeafMutex;
-  mutable std::unordered_map<uint64_t, Directory> itsLeafCache;
+  std::uint64_t itsId = 0;
+
+  // ---- leaf directory cache, keyed by the offset in the leaf-dirs section ----
+  mutable Fmi::Cache::Cache<uint64_t, DirectoryPtr> itsLeafCache;
 };
 
 // ======================================================================

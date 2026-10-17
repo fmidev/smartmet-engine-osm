@@ -20,48 +20,73 @@ Config::Config(const std::string& configFile)
   try
   {
     libconfig::Config cfg;
+    cfg.setIncludeDir(std::filesystem::path(configFile).parent_path().c_str());
     cfg.readFile(configFile.c_str());
 
-    // Optional leaf directory cache size
+    std::string dir;
+    if (cfg.lookupValue("directory", dir))
+      itsDirectory = dir;
+
+    if (cfg.lookupValue("styles", dir))
+      itsStyleDirectory = dir;
+
     cfg.lookupValue("leaf_cache_size", itsLeafCacheSize);
+    cfg.lookupValue("decoded_cache_mb", itsDecodedCacheMB);
+    cfg.lookupValue("tile_cache_mb", itsTileCacheMB);
+    cfg.lookupValue("rescan_interval", itsRescanInterval);
+    cfg.lookupValue("min_file_age", itsMinFileAge);
 
-    // sources:
+    if (itsRescanInterval < 0)
+      throw Fmi::Exception(BCP, "OSM engine config: rescan_interval must be >= 0");
+
+    // datasets:
     // {
-    //   scandinavia: { file = "/var/smartmet/osm/scandinavia.pmtiles"; }
-    //   global:      { file = "/var/smartmet/osm/global.pmtiles"; }
-    // }
-    if (!cfg.exists("sources"))
-      throw Fmi::Exception(BCP, "OSM engine config: 'sources' group is required");
-
-    const auto& sources = cfg.lookup("sources");
-    if (!sources.isGroup())
-      throw Fmi::Exception(BCP, "OSM engine config: 'sources' must be a group");
-
-    for (int i = 0; i < sources.getLength(); ++i)
+    //   protomaps: { directory = "/smartmet/data/osm/protomaps"; };
+    //   test:      { files = ["/path/a.pmtiles", "/path/b.pmtiles"]; };
+    // };
+    if (cfg.exists("datasets"))
     {
-      const auto& src = sources[i];
-      std::string name = src.getName();
+      const auto& datasets = cfg.lookup("datasets");
+      if (!datasets.isGroup())
+        throw Fmi::Exception(BCP, "OSM engine config: 'datasets' must be a group");
 
-      SourceConfig sc;
-      std::string filePath;
-      if (!src.lookupValue("file", filePath))
-        throw Fmi::Exception(BCP, "OSM engine: source '" + name + "' missing 'file'");
-      sc.file = filePath;
+      for (int i = 0; i < datasets.getLength(); ++i)
+      {
+        const auto& ds = datasets[i];
+        std::string name = ds.getName();
 
-      itsSources.emplace(std::move(name), std::move(sc));
+        DatasetConfig dc;
+        std::string path;
+        if (ds.lookupValue("directory", path))
+          dc.directory = path;
+        if (ds.exists("files"))
+        {
+          const auto& files = ds.lookup("files");
+          for (int j = 0; j < files.getLength(); ++j)
+            dc.files.emplace_back(static_cast<const char*>(files[j]));
+        }
+        if (dc.directory.empty() && dc.files.empty())
+          throw Fmi::Exception(BCP,
+                               "OSM engine: dataset '" + name + "' needs 'directory' or 'files'");
+
+        itsDatasets.emplace(std::move(name), std::move(dc));
+      }
     }
 
-    if (itsSources.empty())
-      throw Fmi::Exception(BCP, "OSM engine config: no sources defined");
+    // Missing data is not an error: the data may be installed later, in which
+    // case the rescans will pick it up.
   }
   catch (const libconfig::ParseException& e)
   {
-    throw Fmi::Exception(BCP, "OSM engine config parse error at line " +
-                                   std::to_string(e.getLine()) + ": " + e.getError());
+    throw Fmi::Exception(BCP, "OSM engine config parse error")
+        .addParameter("file", e.getFile() ? e.getFile() : configFile)
+        .addParameter("line", std::to_string(e.getLine()))
+        .addParameter("error", e.getError());
   }
   catch (...)
   {
-    throw Fmi::Exception::Trace(BCP, "OSM engine Config constructor failed");
+    throw Fmi::Exception::Trace(BCP, "OSM engine Config constructor failed")
+        .addParameter("file", configFile);
   }
 }
 

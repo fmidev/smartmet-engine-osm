@@ -1,0 +1,12 @@
+{
+  "name": "smartmet-osm-styles",
+  "private": true,
+  "description": "Generates the MapLibre styles of the SmartMet OSM engine",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.mjs ."
+  },
+  "dependencies": {
+    "@protomaps/basemaps": "5.7.2"
+  }
+}

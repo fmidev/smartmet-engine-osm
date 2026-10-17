@@ -2,7 +2,7 @@ SUBNAME = osm
 SPEC = smartmet-engine-$(SUBNAME)
 INCDIR = smartmet/engines/$(SUBNAME)
 
-REQUIRES = configpp
+REQUIRES = configpp fmt gdal jsoncpp
 
 include $(shell echo $${PREFIX-/usr})/share/smartmet/devel/makefile.inc
 
@@ -11,6 +11,7 @@ DEFINES = -DUNIX -D_REENTRANT
 LIBS += $(PREFIX_LDFLAGS) \
 	$(REQUIRED_LIBS) \
 	-lsmartmet-spine \
+	-lsmartmet-gis \
 	-lsmartmet-macgyver \
 	-lboost_thread \
 	-lconfig++ \
@@ -71,6 +72,11 @@ install:
 	done
 	@mkdir -p $(enginedir)
 	$(INSTALL_PROG) $(LIBFILE) $(enginedir)/$(LIBFILE)
+	@mkdir -p $(datadir)/smartmet/osm/styles
+	@for style in styles/protomaps-*.json styles/meteo-*.json; do \
+	  echo $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \
+	  $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \
+	done
 
 test:
 	if test -f test/Makefile ; then $(MAKE) -C test $@; fi
@@ -80,7 +86,7 @@ objdir:
 
 rpm: clean $(SPEC).spec
 	rm -f $(SPEC).tar.gz
-	tar -czvf $(SPEC).tar.gz --exclude test --exclude-vcs --transform "s,^,$(SPEC)/," *
+	tar -czvf $(SPEC).tar.gz --exclude test --exclude node_modules --exclude-vcs --transform "s,^,$(SPEC)/," *
 	rpmbuild -tb $(SPEC).tar.gz
 	rm -f $(SPEC).tar.gz
 

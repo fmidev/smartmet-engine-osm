@@ -1,6 +1,6 @@
 PROG = $(patsubst %.cpp,%,$(wildcard *Test.cpp))
 
-REQUIRES = configpp
+REQUIRES = configpp fmt gdal jsoncpp
 
 include $(shell echo $${PREFIX-/usr})/share/smartmet/devel/makefile.inc
 
@@ -14,6 +14,7 @@ LIBS += \
 	../osm.so \
 	$(REQUIRED_LIBS) \
 	-lsmartmet-spine \
+	-lsmartmet-gis \
 	-lsmartmet-macgyver \
 	-lboost_thread \
 	-lconfig++ \
@@ -37,3 +38,7 @@ $(PROG) : % : %.cpp Makefile ../osm.so
 	$(CXX) $(CFLAGS) -o $@ $@.cpp $(INCLUDES) $(LIBS)
 
 .PHONY: all clean test
+
+# Development tool for rendering maps without a server
+render: render.cpp Makefile ../osm.so
+	$(CXX) $(CFLAGS) -O2 -o $@ $@.cpp $(INCLUDES) $(LIBS) -lsmartmet-gis $(shell pkg-config --libs gdal)

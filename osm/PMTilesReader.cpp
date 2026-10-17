@@ -14,8 +14,8 @@
 #include <zstd.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
-#include <mutex>
 
 namespace SmartMet
 {
@@ -48,6 +48,9 @@ constexpr uint64_t kMaxDirectoryEntries = 10'000'000;
 // bound stops a self-referential / cyclic leaf pointer from causing an
 // unbounded loop.
 constexpr int kMaxLeafDepth = 4;
+
+// Source of unique reader ids
+std::atomic<std::uint64_t> gReaderCounter{0};
 
 // Overflow-safe range check: is the half-open range [offset, offset+length)
 // fully contained in a buffer of the given size, without the offset+length
@@ -170,7 +173,8 @@ std::vector<std::byte> decompressZstd(const std::byte* src, std::size_t srcLen)
 //  Construction / mmap
 // ======================================================================
 
-PMTilesReader::PMTilesReader(const std::filesystem::path& path) : itsPath(path)
+PMTilesReader::PMTilesReader(const std::filesystem::path& path, std::size_t leafCacheSize)
+    : itsPath(path), itsId(++gReaderCounter), itsLeafCache(std::max<std::size_t>(leafCacheSize, 16))
 {
   try
   {
@@ -313,12 +317,13 @@ std::optional<TileData> PMTilesReader::getTile(
     // Bound the number of leaf levels we follow so that a self-referential or
     // cyclic leaf pointer in a hostile file cannot spin forever.
     int depth = 0;
+    DirectoryPtr leaf;  // keeps the directory e points into alive
     while (e->runLength == 0)
     {
       if (++depth > kMaxLeafDepth)
         throw Fmi::Exception(BCP, "PMTiles: leaf directory recursion limit exceeded");
-      const Directory& leaf = getLeafDirectory(e->offset, e->length);
-      e = findEntry(leaf, tileId);
+      leaf = getLeafDirectory(e->offset, e->length);
+      e = findEntry(*leaf, tileId);
       if (!e)
         return {};
     }
@@ -342,6 +347,52 @@ std::optional<TileData> PMTilesReader::getTile(
   catch (...)
   {
     throw Fmi::Exception::Trace(BCP, "PMTilesReader::getTile failed");
+  }
+}
+
+// ======================================================================
+//  Decompressed tile access
+// ======================================================================
+
+std::string PMTilesReader::decompressTile(const TileData& tile) const
+{
+  try
+  {
+    const auto offset = static_cast<uint64_t>(tile.data - itsData);
+    auto bytes = decompress(offset, tile.size, itsHeader.tileCompression);
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+  }
+  catch (...)
+  {
+    throw Fmi::Exception::Trace(BCP, "PMTilesReader::decompressTile failed")
+        .addParameter("file", itsPath.string());
+  }
+}
+
+std::optional<std::string> PMTilesReader::getDecompressedTile(uint8_t z,
+                                                              uint32_t x,
+                                                              uint32_t y) const
+{
+  auto tile = getTile(z, x, y);
+  if (!tile)
+    return {};
+  return decompressTile(*tile);
+}
+
+std::string PMTilesReader::metadata() const
+{
+  try
+  {
+    if (itsHeader.metadataLength == 0)
+      return {};
+    auto bytes = decompress(
+        itsHeader.metadataOffset, itsHeader.metadataLength, itsHeader.internalCompression);
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+  }
+  catch (...)
+  {
+    throw Fmi::Exception::Trace(BCP, "PMTilesReader::metadata failed")
+        .addParameter("file", itsPath.string());
   }
 }
 
@@ -523,20 +574,15 @@ uint64_t PMTilesReader::readVarint(const std::byte*& p, const std::byte* end)
 }
 
 // ======================================================================
-//  Leaf directory cache — thread-safe shared_mutex
+//  Leaf directory cache
 // ======================================================================
 
-const Directory& PMTilesReader::getLeafDirectory(uint64_t offset, uint32_t length) const
+DirectoryPtr PMTilesReader::getLeafDirectory(uint64_t offset, uint32_t length) const
 {
   try
   {
-    // Check cache with shared (read) lock first
-    {
-      std::shared_lock<std::shared_mutex> lock(itsLeafMutex);
-      auto it = itsLeafCache.find(offset);
-      if (it != itsLeafCache.end())
-        return it->second;
-    }
+    if (auto cached = itsLeafCache.find(offset))
+      return *cached;
 
     // Validate the leaf-directory region against the leaf-dirs section extent
     // using overflow-safe arithmetic BEFORE computing the absolute file offset.
@@ -546,15 +592,13 @@ const Directory& PMTilesReader::getLeafDirectory(uint64_t offset, uint32_t lengt
     if (!rangeWithin(offset, length, itsHeader.leafDirsLength))
       throw Fmi::Exception(BCP, "PMTiles: leaf directory region out of bounds");
 
-    // Not in cache — decompress and insert with exclusive lock
+    // Not in cache. Two threads may decode the same directory simultaneously,
+    // which is harmless.
     auto leafBytes =
         decompress(itsHeader.leafDirsOffset + offset, length, itsHeader.internalCompression);
-    Directory leafDir = decodeDirectory(leafBytes);
-
-    std::unique_lock<std::shared_mutex> lock(itsLeafMutex);
-    // Double-check after acquiring exclusive lock
-    auto [it, inserted] = itsLeafCache.emplace(offset, std::move(leafDir));
-    return it->second;
+    auto leafDir = std::make_shared<const Directory>(decodeDirectory(leafBytes));
+    itsLeafCache.insert(offset, leafDir);
+    return leafDir;
   }
   catch (...)
   {
@@ -581,10 +625,11 @@ const Entry* PMTilesReader::findEntry(const Directory& dir, uint64_t tileId)
   --it;
 
   // For a run (runLength > 0): tile must fall within [tileId, tileId+runLength)
-  // For a leaf pointer (runLength == 0): check if tileId matches exactly
+  // For a leaf pointer (runLength == 0): the leaf covers all ids from its first
+  // tile id up to the first id of the next entry, which upper_bound guarantees.
   const Entry& e = *it;
   if (e.runLength == 0)
-    return (e.tileId == tileId) ? &e : nullptr;
+    return &e;
 
   return (tileId < e.tileId + e.runLength) ? &e : nullptr;
 }
