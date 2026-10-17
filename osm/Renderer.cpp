@@ -29,6 +29,7 @@
 #include <gis/SpatialReference.h>
 #include <macgyver/Exception.h>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -175,12 +176,64 @@ class Projector
   bool isWebMercator() const { return !itsTransformation; }
 
   // Project tile coordinates in place to pixel coordinates. Failed points become NaN.
+  //
+  // Calling PROJ for every point dominates the rendering time, hence each tile
+  // gets a grid of exactly projected points and the points in between are
+  // interpolated bilinearly. The grid is verified at the cell centres and
+  // abandoned for exact projection if the error would be visible.
   void project(std::vector<double>& x,
                std::vector<double>& y,
                int z,
                uint32_t tx,
                uint32_t ty,
                uint32_t extent) const
+  {
+    if (!itsTransformation)
+    {
+      exact(x, y, z, tx, ty, extent);
+      return;
+    }
+
+    const auto& grid = getGrid(z, tx, ty, extent);
+    if (grid.n == 0)
+    {
+      exact(x, y, z, tx, ty, extent);
+      return;
+    }
+
+    const int n = grid.n;
+    const double scale = static_cast<double>(n) / extent;
+    for (std::size_t k = 0; k < x.size(); k++)
+    {
+      const double u = x[k] * scale;
+      const double v = y[k] * scale;
+      const int i = std::clamp(static_cast<int>(std::floor(u)), 0, n - 1);
+      const int j = std::clamp(static_cast<int>(std::floor(v)), 0, n - 1);
+      const double fu = u - i;
+      const double fv = v - j;
+      const std::size_t p00 = static_cast<std::size_t>(j) * (n + 1) + i;
+      const std::size_t p01 = p00 + n + 1;
+      x[k] = (1 - fv) * ((1 - fu) * grid.x[p00] + fu * grid.x[p00 + 1]) +
+             fv * ((1 - fu) * grid.x[p01] + fu * grid.x[p01 + 1]);
+      y[k] = (1 - fv) * ((1 - fu) * grid.y[p00] + fu * grid.y[p00 + 1]) +
+             fv * ((1 - fu) * grid.y[p01] + fu * grid.y[p01 + 1]);
+    }
+  }
+
+ private:
+  struct Grid
+  {
+    int n = 0;  // number of cells per side, 0 if exact projection must be used
+    std::vector<double> x;
+    std::vector<double> y;
+  };
+
+  void exact(std::vector<double>& x,
+             std::vector<double>& y,
+             int z,
+             uint32_t tx,
+             uint32_t ty,
+             uint32_t extent) const
   {
     const double size = 2 * kHalf / std::ldexp(1.0, z);
     const double scale = size / extent;
@@ -202,9 +255,71 @@ class Projector
       itsBox.transform(x[i], y[i]);
   }
 
- private:
+  const Grid& getGrid(int z, uint32_t tx, uint32_t ty, uint32_t extent) const
+  {
+    const auto key = std::make_tuple(z, tx, ty, extent);
+    auto it = itsGrids.find(key);
+    if (it != itsGrids.end())
+      return it->second;
+
+    Grid grid;
+    for (int n : {32, 128})
+    {
+      // Exactly projected grid nodes and cell centres in one call
+      const std::size_t nodes = static_cast<std::size_t>(n + 1) * (n + 1);
+      std::vector<double> x;
+      std::vector<double> y;
+      x.reserve(nodes + n * n);
+      y.reserve(nodes + n * n);
+      const double step = static_cast<double>(extent) / n;
+      for (int j = 0; j <= n; j++)
+        for (int i = 0; i <= n; i++)
+        {
+          x.push_back(i * step);
+          y.push_back(j * step);
+        }
+      for (int j = 0; j < n; j++)
+        for (int i = 0; i < n; i++)
+        {
+          x.push_back((i + 0.5) * step);
+          y.push_back((j + 0.5) * step);
+        }
+      exact(x, y, z, tx, ty, extent);
+
+      bool ok = std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); }) &&
+                std::all_of(y.begin(), y.end(), [](double v) { return std::isfinite(v); });
+
+      // Bilinear interpolation at a cell centre is the mean of its corners
+      for (int j = 0; ok && j < n; j++)
+        for (int i = 0; ok && i < n; i++)
+        {
+          const std::size_t p00 = static_cast<std::size_t>(j) * (n + 1) + i;
+          const std::size_t p01 = p00 + n + 1;
+          const std::size_t c = nodes + static_cast<std::size_t>(j) * n + i;
+          const double ix = (x[p00] + x[p00 + 1] + x[p01] + x[p01 + 1]) / 4;
+          const double iy = (y[p00] + y[p00 + 1] + y[p01] + y[p01 + 1]) / 4;
+          if (std::hypot(ix - x[c], iy - y[c]) > 0.2)
+            ok = false;
+        }
+
+      if (ok)
+      {
+        grid.n = n;
+        x.resize(nodes);
+        y.resize(nodes);
+        grid.x = std::move(x);
+        grid.y = std::move(y);
+        break;
+      }
+    }
+    return itsGrids.emplace(key, std::move(grid)).first->second;
+  }
+
   const Fmi::Box& itsBox;
   std::optional<Fmi::CoordinateTransformation> itsTransformation;
+
+  // Grids of the tiles used, the projector is used by one thread only
+  mutable std::map<std::tuple<int, uint32_t, uint32_t, uint32_t>, Grid> itsGrids;
 };
 
 // A tile to be rendered and the areas of it to use
@@ -389,23 +504,40 @@ class PathBuilder
     if (pts.size() < (ring ? 3U : 2U))
       return;
 
+    // Fast formatting of the rounded coordinates, which are integers scaled by
+    // 10^precision: the integer part, then the fraction without trailing zeros
+    const long divisor = std::lround(factor);
     auto coord = [&](long v)
     {
-      if (itsPrecision <= 0)
-        return fmt::format("{}", v);
-      return number(static_cast<double>(v) / factor, itsPrecision);
+      if (v < 0)
+      {
+        path += '-';
+        v = -v;
+      }
+      char buf[24];
+      auto res = std::to_chars(buf, buf + sizeof(buf), v / divisor);
+      path.append(buf, res.ptr);
+      long frac = v % divisor;
+      if (frac == 0)
+        return;
+      path += '.';
+      for (long d = divisor / 10; d > 0 && frac > 0; d /= 10)
+      {
+        path += static_cast<char>('0' + frac / d);
+        frac %= d;
+      }
     };
 
     path += 'M';
-    path += coord(pts[0].first);
+    coord(pts[0].first);
     path += ' ';
-    path += coord(pts[0].second);
+    coord(pts[0].second);
     for (std::size_t i = 1; i < pts.size(); i++)
     {
       path += (i == 1 ? 'L' : ' ');
-      path += coord(pts[i].first);
+      coord(pts[i].first);
       path += ' ';
-      path += coord(pts[i].second);
+      coord(pts[i].second);
     }
     if (ring)
       path += 'Z';
@@ -540,7 +672,22 @@ std::tuple<std::string, std::string, std::string> font(const std::string& name)
       {" Bold", "bold"},
       {" Light", "300"},
       {" Black", "900"}};
-  std::string family = name;
+  // VersaTiles uses names like "noto_sans_bold"
+  std::string family;
+  bool capitalize = true;
+  for (char c : name)
+  {
+    if (c == '_' || c == ' ')
+    {
+      family += ' ';
+      capitalize = true;
+    }
+    else
+    {
+      family += (capitalize ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c);
+      capitalize = false;
+    }
+  }
   std::string style = "normal";
   std::string weight = "normal";
   auto italic = family.find(" Italic");

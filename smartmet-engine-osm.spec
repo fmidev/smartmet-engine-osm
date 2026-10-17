@@ -49,6 +49,10 @@ Requires: jsoncpp
 Requires: libconfig17
 Requires: zlib
 Requires: libzstd
+# smartmet-osm-update
+Requires: curl
+Requires: python3
+Requires: util-linux
 Provides: %{SPECNAME}
 
 %description
@@ -83,6 +87,7 @@ rm -rf $RPM_BUILD_ROOT
 %files -n %{SPECNAME}
 %defattr(0775,root,root,0775)
 %{_datadir}/smartmet/engines/%{DIRNAME}.so
+%{_bindir}/smartmet-osm-update
 %defattr(0664,root,root,0775)
 %{_datadir}/smartmet/osm/styles/*.json
 
@@ -99,7 +104,12 @@ rm -rf $RPM_BUILD_ROOT
 - Server side rendering of the datasets with MapLibre styles into SVG elements
   (fill, line and point symbol layers, expressions and legacy filters, any CRS)
 - Vector tiles beyond the available zoom levels are cut from their ancestors
-- Ships the Protomaps basemap styles and new meteorological background styles
+- Ships the Protomaps basemap styles, VersaTiles themes for the Protomaps schema
+  and new meteorological background styles
+- smartmet-osm-update downloads and installs the Protomaps basemap builds (the
+  whole planet or extracts) atomically
+- The engine interface is virtual so that plugins need not link against it
+- Fast rendering: per-tile interpolated projection grids, direct coordinate formatting
 - Fixed leaf directory lookups, which missed most tiles of large files
 - Tiles are decompressed according to the tile compression of the file
 - The leaf directory cache is now bounded by leaf_cache_size

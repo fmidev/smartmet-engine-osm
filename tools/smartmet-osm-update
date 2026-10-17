@@ -1,0 +1,162 @@
+#!/bin/bash
+#
+# Keep the OpenStreetMap basemap of the SmartMet OSM engine up to date.
+#
+# Downloads the latest Protomaps basemap build (https://maps.protomaps.com/builds)
+# into a dataset directory of the OSM engine, verifies it and moves it into
+# place atomically. The engine notices the new file at its next rescan and
+# switches to it; requests in progress keep using the old file.
+#
+# Two modes:
+#
+#   planet   The whole planet with all zoom levels (about 140 GB). Fastest to
+#            serve and simplest to maintain.
+#
+#   extract  Only the requested area and zoom levels, cut from the remote build
+#            with HTTP range requests. Needs the pmtiles tool from
+#            https://github.com/protomaps/go-pmtiles/releases. Use this for a
+#            global file with fewer zoom levels plus detailed regional files:
+#
+#              smartmet-osm-update -m extract -n world -z 8
+#              smartmet-osm-update -m extract -n nordic -z 15 -b 4,54,33,72
+#
+#            The engine combines the files of the dataset directory by
+#            resolution, so the region is served in detail and the rest of
+#            the world up to zoom 8 (and overzoomed beyond that).
+#
+# Run daily or weekly from cron or a systemd timer. Builds are published daily,
+# the OSM data changes slowly, so weekly updates are usually enough.
+#
+# The data is OpenStreetMap data under the ODbL: maps made from it must show
+# "© OpenStreetMap contributors". The data is never packaged with SmartMet.
+
+set -euo pipefail
+
+DATADIR=/smartmet/data/osm
+DATASET=protomaps
+MODE=planet
+NAME=planet
+MAXZOOM=""
+BBOX=""
+BUILD=latest
+KEEP_DOWNLOADS=0
+PMTILES=pmtiles
+INDEX_URL=https://build-metadata.protomaps.dev/builds.json
+BUILD_URL=https://build.protomaps.com
+
+usage()
+{
+    cat <<EOF
+Usage: $(basename "$0") [options]
+
+  -d DIR      data directory of the OSM engine (default $DATADIR)
+  -s NAME     dataset (subdirectory) name (default $DATASET)
+  -m MODE     planet or extract (default $MODE)
+  -n NAME     file name without .pmtiles (default $NAME)
+  -z ZOOM     maximum zoom level for extracts
+  -b BBOX     area for extracts: west,south,east,north
+  -B BUILD    build to use, for example 20261017 (default latest)
+  -p PATH     pmtiles tool (default $PMTILES)
+  -f          download even if the build is already installed
+  -h          this help
+EOF
+}
+
+FORCE=0
+while getopts "d:s:m:n:z:b:B:p:fh" opt; do
+    case $opt in
+        d) DATADIR=$OPTARG ;;
+        s) DATASET=$OPTARG ;;
+        m) MODE=$OPTARG ;;
+        n) NAME=$OPTARG ;;
+        z) MAXZOOM=$OPTARG ;;
+        b) BBOX=$OPTARG ;;
+        B) BUILD=$OPTARG ;;
+        p) PMTILES=$OPTARG ;;
+        f) FORCE=1 ;;
+        h) usage; exit 0 ;;
+        *) usage; exit 1 ;;
+    esac
+done
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
+
+case $MODE in
+    planet|extract) ;;
+    *) die "Unknown mode '$MODE'" ;;
+esac
+
+TARGETDIR=$DATADIR/$DATASET
+INCOMING=$DATADIR/.incoming
+TARGET=$TARGETDIR/$NAME.pmtiles
+STAMP=$TARGETDIR/.$NAME.build
+mkdir -p "$TARGETDIR" "$INCOMING"
+
+# Only one update at a time
+exec 9>"$INCOMING/.lock"
+flock -n 9 || die "Another update is running"
+
+# Find the build and its checksum from the build index. Only builds of the
+# current major schema version are used, since the styles depend on it.
+INDEX=$(curl -fsS --retry 5 "$INDEX_URL") || die "Failed to read $INDEX_URL"
+read -r KEY SIZE MD5 VERSION < <(python3 -I -c '
+import base64, json, sys
+builds = json.loads(sys.argv[1])
+wanted = sys.argv[2]
+major = "4."
+cands = [b for b in builds if b.get("version", "").startswith(major)]
+if wanted != "latest":
+    cands = [b for b in cands if b["key"] == wanted + ".pmtiles"]
+if not cands:
+    sys.exit("no matching build")
+b = cands[-1]
+md5 = base64.b64decode(b["md5sum"]).hex() if "md5sum" in b else "-"
+print(b["key"], b["size"], md5, b.get("version", "-"))
+' "$INDEX" "$BUILD") || die "Build $BUILD not found"
+
+URL=$BUILD_URL/$KEY
+SIGNATURE="$KEY $MODE $MAXZOOM $BBOX"
+
+if [ $FORCE -eq 0 ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$SIGNATURE" ] && [ -f "$TARGET" ]; then
+    log "$TARGET is already from $KEY"
+    exit 0
+fi
+
+log "Updating $TARGET from $URL (schema $VERSION)"
+# The build is part of the name so that a resumed download never mixes builds
+TMP=$INCOMING/$NAME-${KEY%.pmtiles}-${MODE}.pmtiles.part
+rm -f $(ls "$INCOMING"/"$NAME"-*.part 2>/dev/null | grep -v "^$TMP\$" || true)
+
+if [ "$MODE" = planet ]; then
+    # Resumable download, retried on broken connections
+    for attempt in $(seq 1 50); do
+        have=$(stat -c %s "$TMP" 2>/dev/null || echo 0)
+        [ "$have" -ge "$SIZE" ] && break
+        curl -fsS --http1.1 -L -C - --retry 10 --retry-delay 10 -o "$TMP" "$URL" || true
+    done
+    [ "$(stat -c %s "$TMP")" -eq "$SIZE" ] || die "Download is incomplete"
+    if [ "$MD5" != "-" ]; then
+        log "Verifying the checksum"
+        sum=$(md5sum "$TMP" | cut -d' ' -f1)
+        [ "$sum" = "$MD5" ] || { rm -f "$TMP"; die "Checksum mismatch, download removed"; }
+    fi
+else
+    command -v "$PMTILES" > /dev/null || die "The pmtiles tool is needed for extracts"
+    args=()
+    [ -n "$MAXZOOM" ] && args+=(--maxzoom="$MAXZOOM")
+    [ -n "$BBOX" ] && args+=(--bbox="$BBOX")
+    rm -f "$TMP"
+    "$PMTILES" extract "$URL" "$TMP" "${args[@]}" --download-threads=4 || die "Extract failed"
+fi
+
+if command -v "$PMTILES" > /dev/null; then
+    "$PMTILES" verify "$TMP" > /dev/null || { rm -f "$TMP"; die "Verification failed"; }
+fi
+
+# The data directory must be on the same file system as the incoming
+# directory for the rename to be atomic. Never overwrite a file in place:
+# the engine has it memory mapped.
+mv -f "$TMP" "$TARGET"
+echo "$SIGNATURE" > "$STAMP"
+log "Installed $KEY as $TARGET"

@@ -7,6 +7,7 @@
     "generate": "node generate.mjs ."
   },
   "dependencies": {
-    "@protomaps/basemaps": "5.7.2"
+    "@protomaps/basemaps": "5.7.2",
+    "@versatiles/style": "7.0.1"
   }
 }

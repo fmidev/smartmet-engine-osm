@@ -53,6 +53,9 @@ namespace OSM
 class Engine : public SmartMet::Spine::SmartMetEngine
 {
  public:
+  // The interface is virtual so that plugins do not need to link against
+  // the engine: the engine is optional and may not be loaded.
+
   Engine() = delete;
   explicit Engine(const std::string& configFile);
 
@@ -63,42 +66,45 @@ class Engine : public SmartMet::Spine::SmartMetEngine
   ~Engine() override;
 
   // Names of the available datasets
-  std::vector<std::string> getDatasets() const;
+  virtual std::vector<std::string> getDatasets() const;
 
   // Dataset information, empty if there is no such dataset
-  std::optional<DatasetInfo> getDatasetInfo(const std::string& dataset) const;
+  virtual std::optional<DatasetInfo> getDatasetInfo(const std::string& dataset) const;
 
   // The most detailed decompressed tile at or above the requested tile.
   // The returned tile coordinates tell which tile was found. Returns
   // std::nullopt if the dataset does not cover the location at all.
-  std::optional<Tile> getTile(const std::string& dataset, uint8_t z, uint32_t x, uint32_t y) const;
+  virtual std::optional<Tile> getTile(const std::string& dataset,
+                                      uint8_t z,
+                                      uint32_t x,
+                                      uint32_t y) const;
 
   // Modification time of the newest file of the dataset (seconds since epoch),
   // 0 if there is no such dataset
-  std::int64_t getDataTimestamp(const std::string& dataset) const;
+  virtual std::int64_t getDataTimestamp(const std::string& dataset) const;
 
   // Render a map. The box defines the area in the given CRS and the image size.
   // Throws if the dataset or the style is not available.
-  ScenePtr renderMap(const MapOptions& options,
-                     const Fmi::SpatialReference& crs,
-                     const Fmi::Box& box) const;
+  virtual ScenePtr renderMap(const MapOptions& options,
+                             const Fmi::SpatialReference& crs,
+                             const Fmi::Box& box) const;
 
   // A vector tile (MVT) in the WebMercatorQuad tiling. Tiles beyond the
   // available resolution are cut from the nearest ancestor. Returns
   // std::nullopt if the dataset does not cover the tile.
-  std::optional<std::string> getVectorTile(const std::string& dataset,
-                                           uint8_t z,
-                                           uint32_t x,
-                                           uint32_t y) const;
+  virtual std::optional<std::string> getVectorTile(const std::string& dataset,
+                                                   uint8_t z,
+                                                   uint32_t x,
+                                                   uint32_t y) const;
 
   // Available map styles
-  std::vector<std::string> getStyles() const;
+  virtual std::vector<std::string> getStyles() const;
 
   // A map style, throws if there is no such style
-  StylePtr getStyle(const std::string& name) const;
+  virtual StylePtr getStyle(const std::string& name) const;
 
   // Rescan the data directories immediately
-  void rescan();
+  virtual void rescan();
 
  protected:
   void init() override;

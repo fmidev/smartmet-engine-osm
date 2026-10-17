@@ -72,8 +72,10 @@ install:
 	done
 	@mkdir -p $(enginedir)
 	$(INSTALL_PROG) $(LIBFILE) $(enginedir)/$(LIBFILE)
+	@mkdir -p $(bindir)
+	$(INSTALL_PROG) tools/smartmet-osm-update $(bindir)/smartmet-osm-update
 	@mkdir -p $(datadir)/smartmet/osm/styles
-	@for style in styles/protomaps-*.json styles/meteo-*.json; do \
+	@for style in styles/protomaps-*.json styles/versatiles-*.json styles/meteo-*.json; do \
 	  echo $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \
 	  $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \
 	done

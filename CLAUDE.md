@@ -4,58 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-smartmet-engine-osm is a SmartMet Server engine that provides zero-copy, memory-mapped access to PMTiles v3 files containing pre-tiled OpenStreetMap vector data. It is used by the Dali WMS plugin for vector tile rendering of OSM map layers.
+smartmet-engine-osm is a SmartMet Server engine serving vector tile datasets (typically
+OpenStreetMap basemaps such as the Protomaps builds) from memory-mapped PMTiles v3 files,
+and rendering them server side with MapLibre styles into SVG elements. Used by the WMS/Dali
+plugin's `OSMLayer` (raster maps, OGC API Tiles MVT); designed to serve an OGC API Maps
+plugin too.
 
 Full developer documentation: `docs/developer-guide.md`.
 
 ## Build commands
 
 ```bash
-make                # Build osm.so shared library
-make debug          # Build with debug flags
-make test           # Run tests (delegates to test/Makefile)
-make clean          # Remove build artifacts
-make format         # Run clang-format on all source files
-make install        # Install library to $(enginedir), headers to $(includedir)/smartmet/engines/osm/
-make rpm            # Build RPM package
+make                # Build osm.so
+make test           # Unit tests (test/*Test.cpp)
+make -C test render # Render tool for development and benchmarks
+make install        # Library, headers, styles (/usr/share/smartmet/osm/styles), smartmet-osm-update
+make rpm
 ```
 
-Requires `smartbuildcfg` to be installed (provides `makefile.inc`). pkg-config dependencies: `configpp`, `zlib`.
+Styles are generated: `cd styles && npm install && node generate.mjs .` (needs node >= 22).
+Test fixtures: `cd test && python3 make_fixtures.py`.
 
-## Architecture
+## Architecture (all in `SmartMet::Engine::OSM`)
 
-Three classes, all in `SmartMet::Engine::OSM`:
+- **Engine** (`Engine.h`) — SmartMetEngine. Virtual interface so plugins need not link against it (get it with `static_pointer_cast` from `Reactor::getSingleton("OSM")`). Owns the stores and a rescan thread.
+- **Config** — data `directory`, `styles`, cache sizes, `rescan_interval`, `min_file_age`, explicit `datasets`.
+- **TileStore** — datasets = subdirectories (and single files) of the data directory. `getTile` returns the most detailed decompressed tile at or above the request (ancestor fallback); files are sorted by max zoom, then area. Rescans reuse readers of unchanged files (path+size+mtime+inode signature).
+- **PMTilesReader** — one mmap'd file; Hilbert tile id; root directory + LRU of leaf directories; decompression (gzip, zstd).
+- **Mvt** (`MvtTile.h`) — protobuf wire decoder (only wanted layers), encoder, `overzoom`.
+- **Expression** — MapLibre expressions, legacy filters and functions compiled to a tree; `Value`, `Color`, `changeCase`.
+- **Style / StyleStore** — MapLibre style documents from the style directory, reloaded when modified.
+- **Renderer** — zoom from resolution (512 px tiles), tile cover by sampling the image, grouping by available resolution (no overlap of coarse and fine data), clip/project (per-tile interpolation grids) /clip, one SVG path per layer and paint, label placement. Produces a `Scene`.
+- **Clip** — Sutherland-Hodgman rings and Cohen-Sutherland lines.
 
-- **Engine** (`osm/Engine.h`) — SmartMetEngine plugin loaded by the server via `dlopen`. Opens all configured PMTiles sources at `init()`, dispatches `getTile(source, z, x, y)` to the correct reader. Entry points for plugin loading: `engine_class_creator` and `engine_name` (returns "OSM").
+## Gotchas
 
-- **Config** (`osm/Config.h`) — Parses a libconfig file defining named tile sources (each maps a name to a `.pmtiles` file path) and a global `leaf_cache_size` setting.
-
-- **PMTilesReader** (`osm/PMTilesReader.h`) — One instance per `.pmtiles` file. Memory-maps the entire file (`mmap MAP_SHARED, PROT_READ`). Tile lookup converts (z,x,y) to a Hilbert-curve tile ID, then walks the two-level directory structure (root + leaf) to locate tile bytes. Returns `TileData` — a raw pointer into the mmap'd region (zero-copy). Thread-safe via `std::shared_mutex` on the leaf directory cache.
-
-### Key data flow
-
-1. Dali plugin calls `Engine::getTile("scandinavia", z, x, y)`
-2. Engine looks up the named `PMTilesReader` in `itsSources`
-3. Reader converts (z,x,y) → Hilbert tile ID via `tileToId()`
-4. Binary search in root directory; if entry points to a leaf, fetch/cache/decompress that leaf directory
-5. Return `TileData{pointer, size}` directly into mmap'd region, or `std::nullopt`
-
-### Compression
-
-Directories may be gzip or zstd compressed. Tile data is returned as-is (still compressed per `tileCompression` in header) — decompression is the caller's responsibility. Brotli is explicitly unsupported.
-
-## Configuration
-
-libconfig format (see `test/cnf/osm.conf` for a full example):
-
-```
-leaf_cache_size = 1024;
-sources: {
-  scandinavia: { file = "/var/smartmet/osm/scandinavia.pmtiles"; };
-  global:      { file = "/var/smartmet/osm/global.pmtiles"; };
-};
-```
-
-## Dependencies
-
-Linked libraries: `smartmet-spine`, `smartmet-macgyver`, `boost_thread`, `config++`, `zstd`, `z`, `pthread`.
+- Files must be replaced by rename, never overwritten (mmap → SIGBUS); not on NFS.
+- Changing the order of virtual functions in `Engine` is an ABI break for the WMS plugin.
+- Styles must match the tile schema of the dataset (Protomaps schema for the shipped styles).
