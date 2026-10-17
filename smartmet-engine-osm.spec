@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.10.16
+Version: 26.10.17
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -31,8 +31,8 @@ BuildRequires: libconfig17-devel
 BuildRequires: zlib-devel
 BuildRequires: libzstd-devel
 Requires: %{smartmet_boost}-thread
-Requires: smartmet-library-spine >= 26.10.16
-Requires: smartmet-library-macgyver >= 26.10.16
+Requires: smartmet-library-spine >= 26.10.17
+Requires: smartmet-library-macgyver >= 26.10.17
 Requires: libconfig17
 Requires: zlib
 Requires: libzstd
@@ -75,6 +75,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Sat Oct 17 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.17-1.fmi
+- Rebuilt against the new library versions
+
 * Fri Oct 16 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.16-1.fmi
 - Fixed compiler warnings and clang-tidy findings (unused code, unreachable code, empty statements, member initialization, parameter passing, noexcept), no functional changes
 
