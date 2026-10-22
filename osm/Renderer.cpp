@@ -1116,7 +1116,7 @@ std::string Scene::svg() const
 // Renderer
 // ----------------------------------------------------------------------
 
-Renderer::Renderer(const TileStore& theTiles, const StyleStore& theStyles, std::size_t theCacheBytes)
+Renderer::Renderer(TileStore& theTiles, const StyleStore& theStyles, std::size_t theCacheBytes)
     : itsTiles(theTiles), itsStyles(theStyles), itsCache(theCacheBytes)
 {
 }
@@ -1317,6 +1317,15 @@ ScenePtr Renderer::render(const MapOptions& theOptions,
 
     const auto& sourceLayers = style->sourceLayers();
     const std::size_t layerHash = boost::hash_range(sourceLayers.begin(), sourceLayers.end());
+
+    // One request for all tiles from sources such as databases
+    std::vector<TileCoord> coords;
+    for (const auto& item : groups)
+    {
+      const auto [a, gx, gy] = item.first;
+      coords.push_back(TileCoord{static_cast<uint8_t>(a), gx, gy});
+    }
+    itsTiles.prefetch(theOptions.dataset, coords);
 
     std::vector<TileWork> works;
     for (const auto& [id, children] : groups)

@@ -13,7 +13,9 @@
 #define BOOST_TEST_MODULE TileStoreTest
 #include <boost/test/included/unit_test.hpp>
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 
@@ -195,5 +197,195 @@ BOOST_AUTO_TEST_CASE(explicit_datasets)
   BOOST_REQUIRE_EQUAL(names.size(), 1U);
   BOOST_CHECK_EQUAL(names[0], "mine");
   BOOST_CHECK_EQUAL(content(store.getTile("mine", 1, 1, 1)), "single 1/1/1");
+  std::filesystem::remove(conf);
+}
+
+BOOST_AUTO_TEST_CASE(newest_version_of_a_file_is_used)
+{
+  auto dir = std::filesystem::temp_directory_path() / ("osm_versions_" + std::to_string(::getpid()));
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  std::filesystem::copy_file(data_dir / "single.pmtiles", dir / "single-20260101.pmtiles");
+  std::filesystem::copy_file(data_dir / "basemap" / "world.pmtiles", dir / "single-20260201.pmtiles");
+
+  auto conf = config_file(dir);
+  Config config(conf.string());
+  TileStore store(config);
+  store.rescan();
+
+  auto names = store.datasets();
+  BOOST_REQUIRE_EQUAL(names.size(), 1U);
+  BOOST_CHECK_EQUAL(names[0], "single");
+  BOOST_CHECK_EQUAL(store.info("single")->files.size(), 1U);
+  BOOST_CHECK_EQUAL(content(store.getTile("single", 1, 1, 1)), "world 1/1/1");
+
+  // A newer version appears
+  std::filesystem::copy_file(data_dir / "single.pmtiles", dir / "single-20260301.pmtiles");
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("single", 1, 1, 1)), "single 1/1/1");
+
+  // The newest version is removed, the previous one is used again
+  std::filesystem::remove(dir / "single-20260301.pmtiles");
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("single", 1, 1, 1)), "world 1/1/1");
+
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove(conf);
+}
+
+BOOST_AUTO_TEST_CASE(pread_access)
+{
+  PMTilesReader mapped(data_dir / "single.pmtiles", 16, FileAccess::Mmap);
+  PMTilesReader unmapped(data_dir / "single.pmtiles", 16, FileAccess::Pread);
+  BOOST_CHECK(mapped.mapped());
+  BOOST_CHECK(!unmapped.mapped());
+  BOOST_CHECK_EQUAL(*mapped.getDecompressedTile(1, 1, 1), *unmapped.getDecompressedTile(1, 1, 1));
+  BOOST_CHECK_EQUAL(mapped.metadata(), unmapped.metadata());
+
+  auto conf = config_file(data_dir, "file_access = \"pread\";\n");
+  Config config(conf.string());
+  TileStore store(config);
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("basemap", 5, 18, 9)), "region 5/18/9");
+  std::filesystem::remove(conf);
+}
+
+BOOST_AUTO_TEST_CASE(failed_reads_cause_a_rescan)
+{
+  // A file which becomes unreadable while in use, as a file replaced on an
+  // NFS server does (ESTALE). Here a short read is caused by truncation.
+  auto dir = std::filesystem::temp_directory_path() / ("osm_failed_" + std::to_string(::getpid()));
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir / "basemap");
+  std::filesystem::copy_file(data_dir / "basemap" / "world.pmtiles",
+                             dir / "basemap" / "world.pmtiles");
+  std::filesystem::copy_file(data_dir / "basemap" / "region.pmtiles",
+                             dir / "basemap" / "region.pmtiles");
+
+  auto conf = config_file(dir, "file_access = \"pread\";\n");
+  Config config(conf.string());
+  TileStore store(config);
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("basemap", 5, 18, 9)), "region 5/18/9");
+
+  std::filesystem::resize_file(dir / "basemap" / "region.pmtiles", 130);
+
+  // The region file fails and is dropped by the rescan, the world file answers
+  BOOST_CHECK_EQUAL(content(store.getTile("basemap", 5, 17, 9)), "world 2/2/1");
+  BOOST_CHECK_EQUAL(store.info("basemap")->files.size(), 1U);
+
+  // A new file moved into place is used again
+  std::filesystem::copy_file(data_dir / "basemap" / "region.pmtiles", dir / "region.tmp");
+  std::filesystem::rename(dir / "region.tmp", dir / "basemap" / "region.pmtiles");
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("basemap", 5, 17, 9)), "region 5/17/9");
+
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove(conf);
+}
+
+// ----------------------------------------------------------------------
+// PostgreSQL, run only when OSM_TEST_DB is a libpq connection string to a
+// database where the test may create the schema osm_test, for example
+//   OSM_TEST_DB="host=127.0.0.1 port=5432 dbname=osm user=osm" make test
+// ----------------------------------------------------------------------
+
+namespace
+{
+const char* test_db()
+{
+  return std::getenv("OSM_TEST_DB");
+}
+
+// libpq connection string to the libconfig settings of the engine
+std::string pg_settings(const std::string& conninfo)
+{
+  std::string ret = "postgresql: { schema = \"osm_test\"; ";
+  std::istringstream in(conninfo);
+  std::string item;
+  while (in >> item)
+  {
+    const auto pos = item.find('=');
+    if (pos == std::string::npos)
+      continue;
+    auto key = item.substr(0, pos);
+    const auto value = item.substr(pos + 1);
+    if (key == "dbname")
+      key = "database";
+    else if (key == "user")
+      key = "username";
+    if (key == "port")
+      ret += key + " = " + value + "; ";
+    else
+      ret += key + " = \"" + value + "\"; ";
+  }
+  return ret + "};\n";
+}
+
+int pgload(const std::string& args)
+{
+  const std::string cmd =
+      "../tools/smartmet-osm-pgload --schema osm_test --db \"" + std::string(test_db()) + "\" " +
+      args + " > /dev/null";
+  return std::system(cmd.c_str());
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(postgresql_datasets, *boost::unit_test::precondition(
+                                               [](boost::unit_test::test_unit_id)
+                                               {
+                                                 return boost::unit_test::assertion_result(
+                                                     test_db() != nullptr);
+                                               }))
+{
+  const auto world = (data_dir / "basemap" / "world.pmtiles").string();
+  const auto region = (data_dir / "basemap" / "region.pmtiles").string();
+  const auto single = (data_dir / "single.pmtiles").string();
+
+  BOOST_REQUIRE_EQUAL(pgload("-d pgtest -v v1 --replace " + world + " " + region), 0);
+  BOOST_REQUIRE_EQUAL(pgload("-d pgtest -v v1 --publish"), 0);
+
+  // Only the database, no directory
+  auto conf = config_file("", pg_settings(test_db()));
+  Config config(conf.string());
+  TileStore store(config);
+  store.rescan();
+
+  auto info = store.info("pgtest");
+  BOOST_REQUIRE(info);
+  BOOST_CHECK_EQUAL(info->files.size(), 2U);
+  BOOST_CHECK_EQUAL(info->maxzoom, 5);
+  BOOST_CHECK_EQUAL(info->files[0].path.string(), "postgresql:pgtest/v1/region");
+
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 5, 18, 9)), "region 5/18/9");
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 5, 0, 0)), "world 2/0/0");
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 10, 581, 296)), "region 5/18/9");
+  BOOST_CHECK(!store.getTile("pgtest", 2, 4, 0));
+
+  // Fetching several tiles at once
+  store.prefetch("pgtest", {TileCoord{1, 1, 0}, TileCoord{1, 0, 1}, TileCoord{2, 3, 3}});
+  const auto hits = store.tileCacheStats().hits;
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 1, 1, 0)), "region 1/1/0");
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 2, 3, 3)), "world 2/3/3");
+  BOOST_CHECK_EQUAL(store.tileCacheStats().hits, hits + 2);
+
+  // A new version is not visible until published
+  BOOST_REQUIRE_EQUAL(pgload("-d pgtest -v v2 --replace " + single), 0);
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 1, 1, 1)), "world 1/1/1");
+  const auto version = store.info("pgtest")->version;
+
+  BOOST_REQUIRE_EQUAL(pgload("-d pgtest -v v2 --publish"), 0);
+  store.rescan();
+  BOOST_CHECK(store.info("pgtest")->version > version);
+  BOOST_CHECK_EQUAL(store.info("pgtest")->files.size(), 1U);
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 1, 1, 1)), "single 1/1/1");
+
+  // The published version cannot be dropped, the others can
+  BOOST_CHECK(pgload("-d pgtest -v v2 --drop 2>/dev/null") != 0);
+  BOOST_CHECK_EQUAL(pgload("-d pgtest --prune 0"), 0);
+  store.rescan();
+  BOOST_CHECK_EQUAL(content(store.getTile("pgtest", 1, 1, 1)), "single 1/1/1");
+
   std::filesystem::remove(conf);
 }

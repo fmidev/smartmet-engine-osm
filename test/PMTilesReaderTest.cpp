@@ -127,8 +127,8 @@ BOOST_AUTO_TEST_CASE(valid_file_parses_and_returns_tile)
   PMTilesReader reader(path);
   auto td = reader.getTile(0, 0, 0);
   BOOST_REQUIRE(td.has_value());
-  BOOST_CHECK_EQUAL(td->size, 4u);
-  BOOST_CHECK_EQUAL(std::memcmp(td->data, tile.data(), 4), 0);
+  BOOST_CHECK_EQUAL(td->size(), 4u);
+  BOOST_CHECK_EQUAL(std::memcmp(td->data(), tile.data(), 4), 0);
 
   std::filesystem::remove(path);
 }

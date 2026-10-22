@@ -1,20 +1,20 @@
 // ======================================================================
 /*!
- * \brief PMTiles v3 memory-mapped reader implementation
+ * \brief PMTiles v3 reader implementation
  */
 // ======================================================================
 
 #include "PMTilesReader.h"
 #include <macgyver/Exception.h>
 #include <fcntl.h>
+#include <linux/magic.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
-#include <zlib.h>
-#include <zstd.h>
 #include <algorithm>
 #include <array>
-#include <atomic>
+#include <cerrno>
 #include <cstring>
 
 namespace SmartMet
@@ -49,15 +49,39 @@ constexpr uint64_t kMaxDirectoryEntries = 10'000'000;
 // unbounded loop.
 constexpr int kMaxLeafDepth = 4;
 
-// Source of unique reader ids
-std::atomic<std::uint64_t> gReaderCounter{0};
-
 // Overflow-safe range check: is the half-open range [offset, offset+length)
 // fully contained in a buffer of the given size, without the offset+length
 // addition wrapping around? Written so that no intermediate value can overflow.
 inline bool rangeWithin(uint64_t offset, uint64_t length, uint64_t size)
 {
   return offset <= size && length <= size - offset;
+}
+
+// True if the file is on a network file system, where a file replaced on the
+// server becomes unreadable for the clients which have it open
+bool on_network_fs(int fd)
+{
+  struct statfs fs{};
+  if (::fstatfs(fd, &fs) != 0)
+    return true;  // be safe
+
+  switch (static_cast<unsigned long>(fs.f_type))
+  {
+    case NFS_SUPER_MAGIC:
+    case SMB_SUPER_MAGIC:
+    case 0xFF534D42UL:  // CIFS
+    case 0xFE534D42UL:  // SMB2
+    case 0x65735546UL:  // FUSE (sshfs, s3fs, ...)
+    case 0x00C36400UL:  // Ceph
+    case 0x0BD00BD0UL:  // Lustre
+    case 0x47504653UL:  // GPFS
+    case 0x6B414653UL:  // AFS
+    case 0x013111A8UL:  // IBRIX
+    case 0x5346414FUL:  // OpenAFS
+      return true;
+    default:
+      return false;
+  }
 }
 
 // Read a little-endian uint64 from a byte pointer
@@ -76,114 +100,35 @@ inline int32_t readI32LE(const std::byte* p)
   return v;
 }
 
-// Decompress with zlib (gzip stream)
-std::vector<std::byte> decompressGzip(const std::byte* src, std::size_t srcLen)
-{
-  // Estimate: directories are rarely > 16 MB
-  std::vector<std::byte> dst(srcLen * 4);
-  for (int attempt = 0; attempt < 4; ++attempt)
-  {
-    z_stream zs{};
-    // inflateInit2 with 32 + MAX_WBITS → auto-detect gzip/zlib header
-    if (inflateInit2(&zs, 32 + MAX_WBITS) != Z_OK)
-      throw Fmi::Exception(BCP, "zlib inflateInit2 failed");
-
-    zs.next_in = reinterpret_cast<Bytef*>(const_cast<std::byte*>(src));
-    zs.avail_in = static_cast<uInt>(srcLen);
-    zs.next_out = reinterpret_cast<Bytef*>(dst.data());
-    zs.avail_out = static_cast<uInt>(dst.size());
-
-    int ret = inflate(&zs, Z_FINISH);
-    inflateEnd(&zs);
-
-    if (ret == Z_STREAM_END)
-    {
-      dst.resize(zs.total_out);
-      return dst;
-    }
-    if (ret == Z_BUF_ERROR || zs.avail_out == 0)
-    {
-      dst.resize(dst.size() * 4);  // grow and retry
-      continue;
-    }
-    throw Fmi::Exception(BCP, "zlib inflate failed").addParameter("zlib_ret", std::to_string(ret));
-  }
-  throw Fmi::Exception(BCP, "PMTiles gzip decompress: output buffer exhausted");
-}
-
-// Decompress with zstd
-std::vector<std::byte> decompressZstd(const std::byte* src, std::size_t srcLen)
-{
-  unsigned long long const frameSize =
-      ZSTD_getFrameContentSize(reinterpret_cast<const void*>(src), srcLen);
-
-  if (frameSize == ZSTD_CONTENTSIZE_ERROR)
-    throw Fmi::Exception(BCP, "PMTiles zstd: not a valid zstd frame");
-
-  std::size_t dstLen = (frameSize == ZSTD_CONTENTSIZE_UNKNOWN)
-                           ? std::max(srcLen * 4, std::size_t{65536})
-                           : static_cast<std::size_t>(frameSize);
-
-  std::vector<std::byte> dst(dstLen);
-
-  if (frameSize != ZSTD_CONTENTSIZE_UNKNOWN)
-  {
-    // Known size — decompress directly
-    std::size_t n = ZSTD_decompress(dst.data(), dstLen, src, srcLen);
-    if (ZSTD_isError(n))
-      throw Fmi::Exception(BCP, "PMTiles zstd decompress failed")
-          .addParameter("zstd_error", ZSTD_getErrorName(n));
-    dst.resize(n);
-    return dst;
-  }
-
-  // Unknown decompressed size — use streaming decompression
-  ZSTD_DStream* dstream = ZSTD_createDStream();
-  if (!dstream)
-    throw Fmi::Exception(BCP, "ZSTD_createDStream failed");
-
-  ZSTD_initDStream(dstream);
-  ZSTD_inBuffer in{reinterpret_cast<const void*>(src), srcLen, 0};
-  std::size_t outPos = 0;
-
-  while (in.pos < in.size)
-  {
-    if (outPos >= dst.size())
-      dst.resize(dst.size() * 2);
-
-    ZSTD_outBuffer out{dst.data() + outPos, dst.size() - outPos, 0};
-    std::size_t ret = ZSTD_decompressStream(dstream, &out, &in);
-    if (ZSTD_isError(ret))
-    {
-      ZSTD_freeDStream(dstream);
-      throw Fmi::Exception(BCP, "PMTiles zstd stream decompress failed")
-          .addParameter("zstd_error", ZSTD_getErrorName(ret));
-    }
-    outPos += out.pos;
-  }
-
-  ZSTD_freeDStream(dstream);
-  dst.resize(outPos);
-  return dst;
-}
-
 }  // anonymous namespace
 
 // ======================================================================
-//  Construction / mmap
+//  Construction
 // ======================================================================
 
-PMTilesReader::PMTilesReader(const std::filesystem::path& path, std::size_t leafCacheSize)
-    : itsPath(path), itsId(++gReaderCounter), itsLeafCache(std::max<std::size_t>(leafCacheSize, 16))
+FileAccess parseFileAccess(const std::string& theName)
+{
+  if (theName == "auto")
+    return FileAccess::Auto;
+  if (theName == "mmap")
+    return FileAccess::Mmap;
+  if (theName == "pread")
+    return FileAccess::Pread;
+  throw Fmi::Exception(BCP, "Unknown file access mode '" + theName + "'")
+      .addParameter("allowed", "auto, mmap, pread");
+}
+
+PMTilesReader::PMTilesReader(const std::filesystem::path& path,
+                             std::size_t leafCacheSize,
+                             FileAccess access)
+    : itsPath(path), itsLeafCache(std::max<std::size_t>(leafCacheSize, 16))
 {
   try
   {
-    // Open the file
     itsFd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (itsFd < 0)
       throw Fmi::Exception(BCP, "Cannot open PMTiles file: " + path.string());
 
-    // Determine file size
     struct stat st{};
     if (::fstat(itsFd, &st) != 0)
     {
@@ -198,43 +143,35 @@ PMTilesReader::PMTilesReader(const std::filesystem::path& path, std::size_t leaf
       throw Fmi::Exception(BCP, "PMTiles file too small: " + path.string());
     }
 
-    // Memory-map the whole file read-only. MAP_SHARED lets the kernel
-    // manage pages via its page cache. madvise(MADV_RANDOM) tells it
-    // not to do sequential read-ahead since tile access is random.
-    void* addr =
-        ::mmap(nullptr, itsFileSize, PROT_READ, MAP_SHARED, itsFd, 0);
-    if (addr == MAP_FAILED)
+    if (access == FileAccess::Mmap || (access == FileAccess::Auto && !on_network_fs(itsFd)))
     {
-      ::close(itsFd);
-      throw Fmi::Exception(BCP, "mmap failed: " + path.string());
-    }
-    itsData = reinterpret_cast<const std::byte*>(addr);
+      // MAP_SHARED lets the kernel manage pages via its page cache
+      void* addr = ::mmap(nullptr, itsFileSize, PROT_READ, MAP_SHARED, itsFd, 0);
+      if (addr == MAP_FAILED)
+      {
+        ::close(itsFd);
+        throw Fmi::Exception(BCP, "mmap failed: " + path.string());
+      }
+      itsMapped = reinterpret_cast<const std::byte*>(addr);
 
-    // Hint: random access pattern, no prefetch
-    ::madvise(const_cast<std::byte*>(itsData), itsFileSize, MADV_RANDOM);
-    // Exclude from core dumps to reduce dump sizes
-    ::madvise(const_cast<std::byte*>(itsData), itsFileSize, MADV_DONTDUMP);
+      // Random access pattern, no read-ahead
+      ::madvise(const_cast<std::byte*>(itsMapped), itsFileSize, MADV_RANDOM);
+      // Exclude from core dumps to reduce dump sizes
+      ::madvise(const_cast<std::byte*>(itsMapped), itsFileSize, MADV_DONTDUMP);
+    }
 
     // Parse the 127-byte header
-    const std::byte* h = itsData;
+    const auto region = read(0, kHeaderSize);
+    const std::byte* h = region.data();
 
-    // Verify magic
     if (std::memcmp(h, kMagic.data(), 7) != 0)
-    {
-      ::munmap(const_cast<std::byte*>(itsData), itsFileSize);
-      ::close(itsFd);
       throw Fmi::Exception(BCP, "Not a PMTiles file: " + path.string());
-    }
 
-    // Verify spec version
     uint8_t version = static_cast<uint8_t>(h[7]);
     if (version != kSpecVersion)
-    {
-      ::munmap(const_cast<std::byte*>(itsData), itsFileSize);
-      ::close(itsFd);
-      throw Fmi::Exception(BCP, "Unsupported PMTiles version " + std::to_string(version) +
-                                     " in: " + path.string());
-    }
+      throw Fmi::Exception(BCP,
+                           "Unsupported PMTiles version " + std::to_string(version) +
+                               " in: " + path.string());
 
     itsHeader.rootDirOffset = readU64LE(h + 8);
     itsHeader.rootDirLength = readU64LE(h + 16);
@@ -262,44 +199,109 @@ PMTilesReader::PMTilesReader(const std::filesystem::path& path, std::size_t leaf
     itsHeader.centerLat = readI32LE(h + 123) / 1e7F;
 
     // Validate every file-derived section offset/length against the actual
-    // mapped file size, using overflow-safe arithmetic. This guarantees that
+    // file size, using overflow-safe arithmetic. This guarantees that
     // any offset later derived relative to these sections (leaf dirs, tile
     // data) cannot overflow when added to the section base.
     if (!rangeWithin(itsHeader.rootDirOffset, itsHeader.rootDirLength, itsFileSize) ||
         !rangeWithin(itsHeader.metadataOffset, itsHeader.metadataLength, itsFileSize) ||
         !rangeWithin(itsHeader.leafDirsOffset, itsHeader.leafDirsLength, itsFileSize) ||
         !rangeWithin(itsHeader.tileDataOffset, itsHeader.tileDataLength, itsFileSize))
-    {
-      ::munmap(const_cast<std::byte*>(itsData), itsFileSize);
-      ::close(itsFd);
       throw Fmi::Exception(BCP, "PMTiles header section out of file bounds: " + path.string());
-    }
 
     // Decompress and decode root directory into RAM (always kept resident)
     auto rootBytes = decompress(
         itsHeader.rootDirOffset, itsHeader.rootDirLength, itsHeader.internalCompression);
     itsRootDirectory = decodeDirectory(rootBytes);
+
+    SourceHeader summary;
+    summary.tileType = itsHeader.tileType;
+    summary.tileCompression = itsHeader.tileCompression;
+    summary.minZoom = itsHeader.minZoom;
+    summary.maxZoom = itsHeader.maxZoom;
+    summary.west = itsHeader.minLon;
+    summary.south = itsHeader.minLat;
+    summary.east = itsHeader.maxLon;
+    summary.north = itsHeader.maxLat;
+    setSummary(summary);
   }
   catch (...)
   {
+    if (itsMapped)
+      ::munmap(const_cast<std::byte*>(itsMapped), itsFileSize);
+    if (itsFd >= 0)
+      ::close(itsFd);
     throw Fmi::Exception::Trace(BCP, "PMTilesReader constructor failed");
   }
 }
 
 PMTilesReader::~PMTilesReader()
 {
-  if (itsData)
-    ::munmap(const_cast<std::byte*>(itsData), itsFileSize);
+  if (itsMapped)
+    ::munmap(const_cast<std::byte*>(itsMapped), itsFileSize);
   if (itsFd >= 0)
     ::close(itsFd);
+}
+
+// ======================================================================
+//  File access
+// ======================================================================
+
+PMTilesReader::Region PMTilesReader::read(uint64_t offset, uint64_t length) const
+{
+  // Overflow-safe bounds check: a naive "offset + length > itsFileSize" can be
+  // bypassed by a crafted length that makes the addition wrap around.
+  if (!rangeWithin(offset, length, itsFileSize))
+    throw Fmi::Exception(BCP, "PMTiles: region extends past end of file");
+
+  Region region;
+  region.itsSize = length;
+  if (itsMapped)
+  {
+    region.itsView = itsMapped + offset;
+    return region;
+  }
+
+  region.itsBuffer.resize(length);
+  std::size_t done = 0;
+  while (done < length)
+  {
+    const auto n = ::pread(itsFd,
+                           region.itsBuffer.data() + done,
+                           length - done,
+                           static_cast<off_t>(offset + done));
+    if (n > 0)
+    {
+      done += static_cast<std::size_t>(n);
+      continue;
+    }
+    if (n < 0 && errno == EINTR)
+      continue;
+
+    // A replaced file on NFS gives ESTALE, a truncated one a short read
+    const int err = (n < 0 ? errno : 0);
+    itsFailed = true;
+    throw Fmi::Exception(BCP, "PMTiles: read failed")
+        .addParameter("file", itsPath.string())
+        .addParameter("error", err != 0 ? std::strerror(err) : "unexpected end of file");
+  }
+  return region;
+}
+
+// ----------------------------------------------------------------------
+
+std::vector<std::byte> PMTilesReader::decompress(uint64_t offset,
+                                                 uint64_t length,
+                                                 Compression compression) const
+{
+  const auto region = read(offset, length);
+  return OSM::decompress(region.data(), region.size(), compression);
 }
 
 // ======================================================================
 //  Tile lookup
 // ======================================================================
 
-std::optional<TileData> PMTilesReader::getTile(
-    uint8_t z, uint32_t x, uint32_t y) const
+std::optional<Entry> PMTilesReader::findTile(uint8_t z, uint32_t x, uint32_t y) const
 {
   try
   {
@@ -332,52 +334,94 @@ std::optional<TileData> PMTilesReader::getTile(
     if (tileId >= e->tileId + e->runLength)
       return {};
 
-    // The tile bytes live in the tile-data section at [e->offset, e->offset +
-    // e->length). Validate that range against the tile-data section extent with
-    // overflow-safe arithmetic before handing out a raw pointer, so a crafted
-    // directory offset/length cannot produce an out-of-bounds view.
+    // Validate the tile range against the tile-data section extent with
+    // overflow-safe arithmetic, so a crafted directory offset/length cannot
+    // produce an out-of-bounds read.
     if (!rangeWithin(e->offset, e->length, itsHeader.tileDataLength))
       throw Fmi::Exception(BCP, "PMTiles: tile data region out of bounds");
 
-    // All tiles in a run share the same data (deduplication)
-    const std::byte* tileBase =
-        itsData + itsHeader.tileDataOffset + e->offset;
-    return TileData{tileBase, e->length};
+    return *e;
   }
   catch (...)
   {
-    throw Fmi::Exception::Trace(BCP, "PMTilesReader::getTile failed");
+    throw Fmi::Exception::Trace(BCP, "PMTilesReader::findTile failed");
   }
 }
 
-// ======================================================================
-//  Decompressed tile access
-// ======================================================================
+// ----------------------------------------------------------------------
 
-std::string PMTilesReader::decompressTile(const TileData& tile) const
+std::optional<std::string> PMTilesReader::getTile(uint8_t z, uint32_t x, uint32_t y) const
 {
-  try
-  {
-    const auto offset = static_cast<uint64_t>(tile.data - itsData);
-    auto bytes = decompress(offset, tile.size, itsHeader.tileCompression);
-    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
-  }
-  catch (...)
-  {
-    throw Fmi::Exception::Trace(BCP, "PMTilesReader::decompressTile failed")
-        .addParameter("file", itsPath.string());
-  }
+  auto entry = findTile(z, x, y);
+  if (!entry)
+    return {};
+  return readTileData(*entry);
 }
+
+// ----------------------------------------------------------------------
+
+std::string PMTilesReader::readTileData(const Entry& theEntry) const
+{
+  if (!rangeWithin(theEntry.offset, theEntry.length, itsHeader.tileDataLength))
+    throw Fmi::Exception(BCP, "PMTiles: tile data region out of bounds");
+  const auto region = read(itsHeader.tileDataOffset + theEntry.offset, theEntry.length);
+  return {reinterpret_cast<const char*>(region.data()), region.size()};
+}
+
+// ----------------------------------------------------------------------
 
 std::optional<std::string> PMTilesReader::getDecompressedTile(uint8_t z,
                                                               uint32_t x,
                                                               uint32_t y) const
 {
-  auto tile = getTile(z, x, y);
-  if (!tile)
-    return {};
-  return decompressTile(*tile);
+  try
+  {
+    auto entry = findTile(z, x, y);
+    if (!entry)
+      return {};
+    // All tiles in a run share the same data (deduplication)
+    const auto region = read(itsHeader.tileDataOffset + entry->offset, entry->length);
+    return decompressToString(region.data(), region.size(), itsHeader.tileCompression);
+  }
+  catch (...)
+  {
+    throw Fmi::Exception::Trace(BCP, "PMTilesReader::getDecompressedTile failed")
+        .addParameter("file", itsPath.string());
+  }
 }
+
+// ----------------------------------------------------------------------
+
+void PMTilesReader::forEachEntry(const std::function<void(const Entry&)>& theCallback) const
+{
+  try
+  {
+    visit(itsRootDirectory, 0, theCallback);
+  }
+  catch (...)
+  {
+    throw Fmi::Exception::Trace(BCP, "PMTilesReader::forEachEntry failed")
+        .addParameter("file", itsPath.string());
+  }
+}
+
+void PMTilesReader::visit(const Directory& theDirectory,
+                          int theDepth,
+                          const std::function<void(const Entry&)>& theCallback) const
+{
+  if (theDepth > kMaxLeafDepth)
+    throw Fmi::Exception(BCP, "PMTiles: leaf directory recursion limit exceeded");
+
+  for (const auto& e : theDirectory)
+  {
+    if (e.runLength > 0)
+      theCallback(e);
+    else
+      visit(*getLeafDirectory(e.offset, e.length), theDepth + 1, theCallback);
+  }
+}
+
+// ----------------------------------------------------------------------
 
 std::string PMTilesReader::metadata() const
 {
@@ -406,80 +450,6 @@ std::int64_t PMTilesReader::fileTimestamp() const
   if (::fstat(itsFd, &st) != 0)
     return 0;
   return static_cast<std::int64_t>(st.st_mtime);
-}
-
-// ======================================================================
-//  Hilbert curve: xy → 1D index
-// ======================================================================
-
-uint64_t PMTilesReader::xy2d(uint32_t n, uint32_t x, uint32_t y)
-{
-  uint64_t d = 0;
-  for (uint32_t s = n / 2; s > 0; s /= 2)
-  {
-    uint32_t rx = (x & s) > 0 ? 1U : 0U;
-    uint32_t ry = (y & s) > 0 ? 1U : 0U;
-    d += static_cast<uint64_t>(s) * s * ((3U * rx) ^ ry);
-    // Rotate the quadrant
-    if (ry == 0)
-    {
-      if (rx == 1)
-      {
-        x = s - 1 - x;
-        y = s - 1 - y;
-      }
-      std::swap(x, y);
-    }
-  }
-  return d;
-}
-
-uint64_t PMTilesReader::tileToId(uint8_t z, uint32_t x, uint32_t y)
-{
-  // Accumulated tile count for all zoom levels below z:
-  //   sum_{i=0}^{z-1} 4^i = (4^z - 1) / 3
-  uint64_t acc = 0;
-  uint32_t n = 1;
-  for (uint8_t i = 0; i < z; ++i)
-  {
-    acc += static_cast<uint64_t>(n) * n;
-    n <<= 1;  // n = 2^(i+1)
-  }
-  // n is now 2^z, the grid side length
-  return acc + xy2d(n, x, y);
-}
-
-// ======================================================================
-//  Decompress a region of the mmap'd file
-// ======================================================================
-
-std::vector<std::byte> PMTilesReader::decompress(uint64_t offset,
-                                                  uint64_t length,
-                                                  Compression compression) const
-{
-  // Overflow-safe bounds check: a naive "offset + length > itsFileSize" can be
-  // bypassed by a crafted length that makes the addition wrap around.
-  if (!rangeWithin(offset, length, itsFileSize))
-    throw Fmi::Exception(BCP, "PMTiles: compressed region extends past end of file");
-
-  const std::byte* src = itsData + offset;
-
-  switch (compression)
-  {
-    case Compression::None:
-    case Compression::Unknown:
-      return {src, src + length};
-
-    case Compression::Gzip:
-      return decompressGzip(src, length);
-
-    case Compression::Zstd:
-      return decompressZstd(src, length);
-
-    case Compression::Brotli:
-      throw Fmi::Exception(BCP, "PMTiles: brotli compression not supported");
-  }
-  throw Fmi::Exception(BCP, "PMTiles: unknown compression type");
 }
 
 // ======================================================================

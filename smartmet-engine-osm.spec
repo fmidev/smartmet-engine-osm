@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.10.18
+Version: 26.10.22
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -39,6 +39,23 @@ BuildRequires: jsoncpp-devel
 BuildRequires: libconfig17-devel
 BuildRequires: zlib-devel
 BuildRequires: libzstd-devel
+%if 0%{?rhel} && 0%{rhel} == 8
+BuildRequires: libpqxx-devel >= 1:7.7.0, libpqxx-devel < 1:7.8.0
+Requires: libpqxx >= 1:7.7.0, libpqxx < 1:7.8.0
+%else
+%if 0%{?rhel} && 0%{rhel} == 9
+BuildRequires: libpqxx-devel >= 1:7.9.0, libpqxx-devel < 1:7.10.0
+Requires: libpqxx >= 1:7.9.0, libpqxx < 1:7.10.0
+%else
+%if 0%{?rhel} && 0%{rhel} >= 10
+BuildRequires: libpqxx-devel >= 1:7.10.0, libpqxx-devel < 1:7.11.0
+Requires: libpqxx >= 1:7.10.0, libpqxx < 1:7.11.0
+%else
+BuildRequires: libpqxx-devel
+Requires: libpqxx
+%endif
+%endif
+%endif
 Requires: %{smartmet_boost}-thread
 Requires: smartmet-library-spine >= 26.10.17
 Requires: smartmet-library-macgyver >= 26.10.17
@@ -49,6 +66,8 @@ Requires: jsoncpp
 Requires: libconfig17
 Requires: zlib
 Requires: libzstd
+# smartmet-osm-pgload
+Requires: %{smartmet_boost}-program-options
 # smartmet-osm-update
 Requires: curl
 Requires: python3
@@ -57,8 +76,9 @@ Provides: %{SPECNAME}
 
 %description
 FMI SmartMet OSM engine serving vector tile datasets such as OpenStreetMap
-basemaps from PMTiles v3 files in a configured data directory, and rendering
-them server side with MapLibre styles. The data itself is not packaged.
+basemaps from PMTiles v3 files in a configured data directory or from a
+PostgreSQL database, and rendering them server side with MapLibre styles.
+The data itself is not packaged.
 
 %package -n %{SPECNAME}-devel
 Summary: SmartMet %{SPECNAME} development headers
@@ -88,6 +108,7 @@ rm -rf $RPM_BUILD_ROOT
 %defattr(0775,root,root,0775)
 %{_datadir}/smartmet/engines/%{DIRNAME}.so
 %{_bindir}/smartmet-osm-update
+%{_bindir}/smartmet-osm-pgload
 %defattr(0664,root,root,0775)
 %{_datadir}/smartmet/osm/styles/*.json
 
@@ -96,7 +117,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
-* Sun Oct 18 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.18-1.fmi
+* Thu Oct 22 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.22-1.fmi
 - Datasets: the PMTiles files found in the configured directory (one dataset per
   subdirectory) are combined by resolution, each tile coming from the most detailed
   file and missing zoom levels from ancestor tiles; the directories are rescanned
@@ -113,6 +134,16 @@ rm -rf $RPM_BUILD_ROOT
 - Fixed leaf directory lookups, which missed most tiles of large files
 - Tiles are decompressed according to the tile compression of the file
 - The leaf directory cache is now bounded by leaf_cache_size
+- Files on network file systems are read with pread instead of mmap
+  (file_access = auto/mmap/pread), and a read failure such as ESTALE from a
+  file replaced on an NFS server makes the engine rescan and retry once
+- Of files whose names differ only by a version suffix (planet-20261017.pmtiles)
+  only the newest is used, so versions can be installed side by side;
+  smartmet-osm-update -V installs builds under versioned names and deletes
+  the previous ones after a grace period (-k days)
+- Datasets can be stored in PostgreSQL (postgresql setting): versions are
+  loaded and published with the new smartmet-osm-pgload tool, publishing is
+  atomic, and the tiles of a map are fetched with a single query
 
 * Sat Oct 17 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.17-1.fmi
 - Rebuilt against the new library versions

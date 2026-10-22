@@ -5,15 +5,17 @@ Part of [SmartMet Server](https://github.com/fmidev/smartmet-server). See the [S
 ## Overview
 
 The OSM engine serves vector tile datasets such as OpenStreetMap basemaps from PMTiles
-files in a configured data directory, and renders them server side with MapLibre styles.
+files in a configured data directory (also on NFS) or from PostgreSQL, and renders them
+server side with MapLibre styles.
 Global data with few zoom levels and detailed regional files can be combined, so a
 server can be localized anywhere in the world. The WMS plugin uses the engine for map
 backgrounds and vector tiles.
 
 The engine package ships MapLibre styles for the Protomaps basemap schema, among them
-backgrounds designed for meteorological data, and the `smartmet-osm-update` tool for
-installing the [Protomaps](https://docs.protomaps.com/basemaps/downloads) builds. The
-map data itself is not packaged.
+backgrounds designed for meteorological data, the `smartmet-osm-update` tool for
+installing the [Protomaps](https://docs.protomaps.com/basemaps/downloads) builds, and the
+`smartmet-osm-pgload` tool for loading and publishing versions in PostgreSQL. The map
+data itself is not packaged.
 
 ## Documentation
 

@@ -1,0 +1,3 @@
+obj/
+*.so
+tools/smartmet-osm-pgload

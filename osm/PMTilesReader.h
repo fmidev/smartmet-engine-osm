@@ -2,13 +2,15 @@
 /*!
  * \brief PMTiles v3 reader
  *
- * Provides zero-copy, memory-mapped access to PMTiles v3 files.
- * The entire file is mapped with mmap(MAP_SHARED, PROT_READ) so that
- * the kernel's page cache manages resident pages — no explicit memory
- * management is done by the application.
+ * Files on local disks are memory-mapped so that the kernel's page cache
+ * manages the resident pages and reads need no system calls. Files on
+ * network file systems are read with pread instead: a file replaced on an
+ * NFS server disappears from under its readers (ESTALE), which would crash
+ * a process using a mapping (SIGBUS), while pread just returns an error.
+ * The reader then reports itself as failed and the tile store reopens the
+ * file.
  *
- * Directory decompression (gzip / zstd) is the only place where heap
- * allocations occur, and those are cached per-file.
+ * Directory decompression (gzip / zstd) results are cached per file.
  *
  * Reference: https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md
  */
@@ -16,10 +18,13 @@
 
 #pragma once
 
+#include "TileSource.h"
 #include <macgyver/Cache.h>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,32 +37,16 @@ namespace Engine
 namespace OSM
 {
 
-// ======================================================================
-//  PMTiles v3 compression codes
-// ======================================================================
-
-enum class Compression : uint8_t
+// How files are read
+enum class FileAccess
 {
-  Unknown = 0,
-  None = 1,
-  Gzip = 2,
-  Brotli = 3,
-  Zstd = 4
+  Auto,  // mmap on local file systems, pread on network file systems
+  Mmap,
+  Pread
 };
 
-// ======================================================================
-//  PMTiles v3 tile types
-// ======================================================================
-
-enum class TileType : uint8_t
-{
-  Unknown = 0,
-  MVT = 1,
-  PNG = 2,
-  JPEG = 3,
-  WebP = 4,
-  AVIF = 5
-};
+// Parse "auto", "mmap" or "pread"
+FileAccess parseFileAccess(const std::string& theName);
 
 // ======================================================================
 //  PMTiles v3 header (127 bytes, little-endian)
@@ -107,57 +96,52 @@ using Directory = std::vector<Entry>;
 using DirectoryPtr = std::shared_ptr<const Directory>;
 
 // ======================================================================
-//  Zero-copy view into the mmap'd tile data (C++17 compatible span substitute)
-// ======================================================================
-
-struct TileData
-{
-  const std::byte* data = nullptr;
-  std::size_t size = 0;
-};
-
-// ======================================================================
 //  PMTilesReader
 //
 //  One instance per .pmtiles file. Thread-safe for concurrent reads.
 // ======================================================================
 
-class PMTilesReader
+class PMTilesReader : public TileSource
 {
  public:
   // The leaf cache size is the number of decoded leaf directories kept in memory.
   // A planet file has a few thousand leaves of roughly 1.5 MB each when decoded.
-  explicit PMTilesReader(const std::filesystem::path& path, std::size_t leafCacheSize = 256);
-  ~PMTilesReader();
+  explicit PMTilesReader(const std::filesystem::path& path,
+                         std::size_t leafCacheSize = 256,
+                         FileAccess access = FileAccess::Auto);
+  ~PMTilesReader() override;
 
   PMTilesReader(const PMTilesReader&) = delete;
   PMTilesReader& operator=(const PMTilesReader&) = delete;
   PMTilesReader(PMTilesReader&&) = delete;
   PMTilesReader& operator=(PMTilesReader&&) = delete;
 
-  // Return a zero-copy view of the (possibly compressed) tile bytes,
-  // pointing directly into the mmap'd region. Returns std::nullopt if
-  // the tile does not exist in this file.
-  std::optional<TileData> getTile(uint8_t z, uint32_t x, uint32_t y) const;
+  // The tile bytes as stored (possibly compressed), std::nullopt if the tile
+  // does not exist in this file
+  std::optional<std::string> getTile(uint8_t z, uint32_t x, uint32_t y) const;
 
   // Return the tile bytes decompressed according to the tile compression of the
   // file. Returns std::nullopt if the tile does not exist in this file.
-  std::optional<std::string> getDecompressedTile(uint8_t z, uint32_t x, uint32_t y) const;
-
-  // Decompress tile bytes obtained from getTile()
-  std::string decompressTile(const TileData& tile) const;
+  std::optional<std::string> getDecompressedTile(uint8_t z,
+                                                 uint32_t x,
+                                                 uint32_t y) const override;
 
   // The JSON metadata section (decompressed), empty if there is none
-  std::string metadata() const;
+  std::string metadata() const override;
+
+  // True after a read error, the file must be reopened
+  bool failed() const override { return itsFailed; }
 
   const PMTilesHeader& header() const { return itsHeader; }
 
-  // Unique id of this reader instance, used in cache keys. A file replaced on
-  // disk is opened by a new reader with a new id.
-  std::uint64_t id() const { return itsId; }
+  // True if the file is memory-mapped, false if it is read with pread
+  bool mapped() const { return itsMapped != nullptr; }
 
-  // Convert tile coordinates to the PMTiles Hilbert-curve tile_id
-  static uint64_t tileToId(uint8_t z, uint32_t x, uint32_t y);
+  // Visit all tile entries (not leaf pointers) in tile id order
+  void forEachEntry(const std::function<void(const Entry&)>& theCallback) const;
+
+  // The raw bytes of a tile entry
+  std::string readTileData(const Entry& theEntry) const;
 
   // Modification time of the source file (seconds since epoch)
   std::int64_t fileTimestamp() const;
@@ -165,13 +149,35 @@ class PMTilesReader
   const std::filesystem::path& path() const { return itsPath; }
 
  private:
-  // Hilbert-curve d = xy2d(n, x, y)
-  static uint64_t xy2d(uint32_t n, uint32_t x, uint32_t y);
+  // Bytes read from the file: a view into the mapping, or a pread buffer
+  class Region
+  {
+   public:
+    const std::byte* data() const { return itsBuffer.empty() ? itsView : itsBuffer.data(); }
+    std::size_t size() const { return itsSize; }
 
-  // Decompress a region of the file into a byte vector
+   private:
+    friend class PMTilesReader;
+    const std::byte* itsView = nullptr;
+    std::vector<std::byte> itsBuffer;
+    std::size_t itsSize = 0;
+  };
+
+  // Read a region of the file, throws on I/O errors and marks the reader failed
+  Region read(uint64_t offset, uint64_t length) const;
+
+  // Read and decompress a region of the file
   std::vector<std::byte> decompress(uint64_t offset,
                                     uint64_t length,
                                     Compression compression) const;
+
+  // The entry of the tile, nullptr if there is none
+  std::optional<Entry> findTile(uint8_t z, uint32_t x, uint32_t y) const;
+
+  // Visit the entries of a directory, following leaf pointers
+  void visit(const Directory& theDirectory,
+             int theDepth,
+             const std::function<void(const Entry&)>& theCallback) const;
 
   // Decode a columnar-encoded directory from raw bytes
   static Directory decodeDirectory(const std::vector<std::byte>& data);
@@ -187,17 +193,16 @@ class PMTilesReader
   // Binary search for tileId in a sorted directory
   static const Entry* findEntry(const Directory& dir, uint64_t tileId);
 
-  // ---- file mapping ----
+  // ---- file access ----
   std::filesystem::path itsPath;
   int itsFd = -1;
-  const std::byte* itsData = nullptr;  // base of mmap'd region
+  const std::byte* itsMapped = nullptr;  // base of the mapping, nullptr when using pread
   std::size_t itsFileSize = 0;
+  mutable std::atomic<bool> itsFailed{false};
 
   // ---- parsed state ----
   PMTilesHeader itsHeader{};
   Directory itsRootDirectory;  // always resident (small, max ~512 KB)
-
-  std::uint64_t itsId = 0;
 
   // ---- leaf directory cache, keyed by the offset in the leaf-dirs section ----
   mutable Fmi::Cache::Cache<uint64_t, DirectoryPtr> itsLeafCache;

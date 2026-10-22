@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include "PMTilesReader.h"
 #include <filesystem>
+#include <optional>
 #include <map>
 #include <string>
 #include <vector>
@@ -24,6 +26,19 @@ struct DatasetConfig
 {
   std::filesystem::path directory;
   std::vector<std::filesystem::path> files;
+};
+
+// Tile database
+struct PgConfig
+{
+  std::string host = "localhost";
+  unsigned int port = 5432;
+  std::string database;
+  std::string username;
+  std::string password;
+  unsigned int connectTimeout = 10;  // seconds
+  std::string schema = "osm";
+  unsigned int maxIdleConnections = 8;  // connections kept open between requests
 };
 
 class Config
@@ -56,6 +71,12 @@ class Config
   // Files modified less than this many seconds ago are not opened yet
   int minFileAge() const { return itsMinFileAge; }
 
+  // How PMTiles files are read
+  FileAccess fileAccess() const { return itsFileAccess; }
+
+  // The tile database, if any
+  const std::optional<PgConfig>& database() const { return itsDatabase; }
+
  private:
   std::filesystem::path itsDirectory;
   std::map<std::string, DatasetConfig> itsDatasets;
@@ -65,6 +86,8 @@ class Config
   unsigned int itsDecodedCacheMB = 1024;
   int itsRescanInterval = 60;
   int itsMinFileAge = 10;
+  FileAccess itsFileAccess = FileAccess::Auto;
+  std::optional<PgConfig> itsDatabase;
 };
 
 }  // namespace OSM

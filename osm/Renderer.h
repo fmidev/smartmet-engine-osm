@@ -29,7 +29,7 @@ namespace OSM
 class Renderer
 {
  public:
-  Renderer(const TileStore& theTiles, const StyleStore& theStyles, std::size_t theCacheBytes);
+  Renderer(TileStore& theTiles, const StyleStore& theStyles, std::size_t theCacheBytes);
 
   // Render the area described by the CRS and the box (bbox and image size)
   ScenePtr render(const MapOptions& theOptions,
@@ -57,7 +57,7 @@ class Renderer
     static std::size_t getSize(const Mvt::TilePtr& theTile) { return theTile->memoryUse(); }
   };
 
-  const TileStore& itsTiles;
+  TileStore& itsTiles;
   const StyleStore& itsStyles;
 
   // Decoded tiles keyed by file id, tile id and the hash of the decoded layer set

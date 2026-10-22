@@ -36,6 +36,42 @@ Config::Config(const std::string& configFile)
     cfg.lookupValue("rescan_interval", itsRescanInterval);
     cfg.lookupValue("min_file_age", itsMinFileAge);
 
+    std::string access;
+    if (cfg.lookupValue("file_access", access))
+      itsFileAccess = parseFileAccess(access);
+
+    // postgresql:
+    // {
+    //   host = "localhost"; port = 5432; database = "osm";
+    //   username = "osm"; password = "secret"; schema = "osm";
+    // };
+    if (cfg.exists("postgresql"))
+    {
+      const auto& pg = cfg.lookup("postgresql");
+      if (!pg.isGroup())
+        throw Fmi::Exception(BCP, "OSM engine config: 'postgresql' must be a group");
+
+      PgConfig db;
+      pg.lookupValue("host", db.host);
+      pg.lookupValue("port", db.port);
+      pg.lookupValue("database", db.database);
+      pg.lookupValue("username", db.username);
+      pg.lookupValue("password", db.password);
+      pg.lookupValue("connect_timeout", db.connectTimeout);
+      pg.lookupValue("schema", db.schema);
+      pg.lookupValue("max_idle_connections", db.maxIdleConnections);
+
+      if (db.database.empty())
+        throw Fmi::Exception(BCP, "OSM engine config: postgresql.database is required");
+      if (db.schema.empty() ||
+          db.schema.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") !=
+              std::string::npos)
+        throw Fmi::Exception(BCP,
+                             "OSM engine config: postgresql.schema must consist of lower case "
+                             "letters, digits and underscores");
+      itsDatabase = std::move(db);
+    }
+
     if (itsRescanInterval < 0)
       throw Fmi::Exception(BCP, "OSM engine config: rescan_interval must be >= 0");
 

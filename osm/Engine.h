@@ -18,8 +18,11 @@
  * most detailed file available, falling back to ancestor tiles when no file
  * has the requested zoom level (the caller overzooms them).
  *
- * The files are memory-mapped, and the directories are rescanned
- * periodically. Install new files with an atomic rename.
+ * Datasets can also be stored in PostgreSQL, see PgSource.h. The files are
+ * memory-mapped on local disks and read with pread on network file systems,
+ * and the directories and the database are rescanned periodically. Install
+ * new files with an atomic rename, or with a versioned name next to the old
+ * one (planet-20261117.pmtiles).
  *
  * Maps are rendered server side with MapLibre styles read from the style
  * directory, producing SVG elements which can be embedded into WMS products

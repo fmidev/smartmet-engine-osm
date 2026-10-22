@@ -27,6 +27,13 @@
 # Run daily or weekly from cron or a systemd timer. Builds are published daily,
 # the OSM data changes slowly, so weekly updates are usually enough.
 #
+# With -V the file name includes the build (planet-20261017.pmtiles) and the
+# previous build is deleted only after the grace period of -k days. The engine
+# uses the newest version of the file. Use this when the servers read the data
+# over NFS: a file replaced on an NFS server becomes unreadable for the clients
+# which still have it open, so the old version must stay until every server has
+# switched to the new one (at its next rescan).
+#
 # The data is OpenStreetMap data under the ODbL: maps made from it must show
 # "© OpenStreetMap contributors". The data is never packaged with SmartMet.
 
@@ -41,6 +48,8 @@ BBOX=""
 BUILD=latest
 KEEP_DOWNLOADS=0
 PMTILES=pmtiles
+VERSIONED=0
+KEEP_DAYS=2
 INDEX_URL=https://build-metadata.protomaps.dev/builds.json
 BUILD_URL=https://build.protomaps.com
 
@@ -57,13 +66,16 @@ Usage: $(basename "$0") [options]
   -b BBOX     area for extracts: west,south,east,north
   -B BUILD    build to use, for example 20261017 (default latest)
   -p PATH     pmtiles tool (default $PMTILES)
+  -V          versioned file names NAME-BUILD.pmtiles, for data shared over NFS
+  -k DAYS     with -V, delete older versions this many days after installing
+              a new one (default $KEEP_DAYS)
   -f          download even if the build is already installed
   -h          this help
 EOF
 }
 
 FORCE=0
-while getopts "d:s:m:n:z:b:B:p:fh" opt; do
+while getopts "d:s:m:n:z:b:B:p:Vk:fh" opt; do
     case $opt in
         d) DATADIR=$OPTARG ;;
         s) DATASET=$OPTARG ;;
@@ -73,6 +85,8 @@ while getopts "d:s:m:n:z:b:B:p:fh" opt; do
         b) BBOX=$OPTARG ;;
         B) BUILD=$OPTARG ;;
         p) PMTILES=$OPTARG ;;
+        V) VERSIONED=1 ;;
+        k) KEEP_DAYS=$OPTARG ;;
         f) FORCE=1 ;;
         h) usage; exit 0 ;;
         *) usage; exit 1 ;;
@@ -87,11 +101,28 @@ case $MODE in
     *) die "Unknown mode '$MODE'" ;;
 esac
 
+case $KEEP_DAYS in
+    ''|*[!0-9]*) die "-k needs a number of days" ;;
+esac
+
 TARGETDIR=$DATADIR/$DATASET
 INCOMING=$DATADIR/.incoming
-TARGET=$TARGETDIR/$NAME.pmtiles
 STAMP=$TARGETDIR/.$NAME.build
 mkdir -p "$TARGETDIR" "$INCOMING"
+
+# Delete the older versions once the newest one has been installed for the grace period
+cleanup()
+{
+    [ $VERSIONED -eq 1 ] && [ -f "$STAMP" ] || return 0
+    [ -n "$(find "$STAMP" -mmin +$((KEEP_DAYS * 1440)))" ] || return 0
+    local current
+    current=$(cat "$STAMP.file" 2>/dev/null) || return 0
+    [ -f "$current" ] || return 0
+    for f in "$TARGETDIR/$NAME"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*.pmtiles; do
+        [ -f "$f" ] && [ "$f" != "$current" ] || continue
+        rm -f "$f" && log "Deleted the old version $f"
+    done
+}
 
 # Only one update at a time
 exec 9>"$INCOMING/.lock"
@@ -117,9 +148,15 @@ print(b["key"], b["size"], md5, b.get("version", "-"))
 
 URL=$BUILD_URL/$KEY
 SIGNATURE="$KEY $MODE $MAXZOOM $BBOX"
+if [ $VERSIONED -eq 1 ]; then
+    TARGET=$TARGETDIR/$NAME-${KEY%.pmtiles}.pmtiles
+else
+    TARGET=$TARGETDIR/$NAME.pmtiles
+fi
 
 if [ $FORCE -eq 0 ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$SIGNATURE" ] && [ -f "$TARGET" ]; then
     log "$TARGET is already from $KEY"
+    cleanup
     exit 0
 fi
 
@@ -156,7 +193,8 @@ fi
 
 # The data directory must be on the same file system as the incoming
 # directory for the rename to be atomic. Never overwrite a file in place:
-# the engine has it memory mapped.
+# the engine may have it memory mapped.
 mv -f "$TMP" "$TARGET"
 echo "$SIGNATURE" > "$STAMP"
+echo "$TARGET" > "$STAMP.file"
 log "Installed $KEY as $TARGET"

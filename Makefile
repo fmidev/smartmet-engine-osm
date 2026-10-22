@@ -2,7 +2,7 @@ SUBNAME = osm
 SPEC = smartmet-engine-$(SUBNAME)
 INCDIR = smartmet/engines/$(SUBNAME)
 
-REQUIRES = configpp fmt gdal jsoncpp
+REQUIRES = configpp fmt gdal jsoncpp libpqxx
 
 include $(shell echo $${PREFIX-/usr})/share/smartmet/devel/makefile.inc
 
@@ -40,7 +40,9 @@ INCLUDES := -Iinclude $(INCLUDES)
 
 # The rules
 
-all: objdir $(LIBFILE)
+PGLOAD = tools/smartmet-osm-pgload
+
+all: objdir $(LIBFILE) $(PGLOAD)
 debug: all
 release: all
 profile: all
@@ -55,8 +57,13 @@ $(LIBFILE): $(OBJS)
 		exit 1; \
 	fi
 
+# Loader of PMTiles files into PostgreSQL, uses the reader of the engine
+$(PGLOAD): tools/pgload.cpp obj/PMTilesReader.o obj/TileSource.o
+	$(CXX) $(CFLAGS) $(INCLUDES) -o $@ tools/pgload.cpp obj/PMTilesReader.o obj/TileSource.o \
+		$(PREFIX_LDFLAGS) $(REQUIRED_LIBS) -lsmartmet-macgyver -lboost_program_options -lzstd -lz
+
 clean:
-	rm -f $(LIBFILE) obj/* *~ $(SUBNAME)/*~
+	rm -f $(LIBFILE) $(PGLOAD) obj/* *~ $(SUBNAME)/*~
 	if test -f test/Makefile ; then $(MAKE) -C test $@; fi
 
 format:
@@ -74,6 +81,7 @@ install:
 	$(INSTALL_PROG) $(LIBFILE) $(enginedir)/$(LIBFILE)
 	@mkdir -p $(bindir)
 	$(INSTALL_PROG) tools/smartmet-osm-update $(bindir)/smartmet-osm-update
+	$(INSTALL_PROG) $(PGLOAD) $(bindir)/smartmet-osm-pgload
 	@mkdir -p $(datadir)/smartmet/osm/styles
 	@for style in styles/protomaps-*.json styles/versatiles-*.json styles/meteo-*.json; do \
 	  echo $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \

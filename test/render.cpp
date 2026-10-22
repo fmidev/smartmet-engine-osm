@@ -19,6 +19,7 @@
 #include <gis/SpatialReference.h>
 #include <macgyver/Exception.h>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -43,6 +44,9 @@ int main(int argc, char* argv[])
       std::ofstream out(conf);
       out << "directory = \"" << argv[1] << "\";\nstyles = \"" << argv[2]
           << "\";\nmin_file_age = 0;\n";
+      // Additional settings such as file_access or postgresql
+      if (const char* extra = std::getenv("OSM_CONFIG_EXTRA"))
+        out << extra << "\n";
     }
     Config config(conf.string());
     std::filesystem::remove(conf);
