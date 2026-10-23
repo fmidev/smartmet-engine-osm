@@ -4,7 +4,7 @@
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
 Version: 26.10.23
-Release: 1%{?dist}.fmi
+Release: 2%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
 URL: https://github.com/fmidev/smartmet-engine-osm
@@ -117,6 +117,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Fri Oct 23 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.23-2.fmi
+- Fixed linking smartmet-osm-pgload on RHEL8: Boost library path and libpthread
+
 * Fri Oct 23 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.23-1.fmi
 - Datasets: the PMTiles files found in the configured directory (one dataset per
   subdirectory) are combined by resolution, each tile coming from the most detailed

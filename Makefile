@@ -57,10 +57,12 @@ $(LIBFILE): $(OBJS)
 		exit 1; \
 	fi
 
-# Loader of PMTiles files into PostgreSQL, uses the reader of the engine
+# Loader of PMTiles files into PostgreSQL, uses the reader of the engine. The library paths of
+# LIBS are needed too, on RHEL8 Boost is in /usr/lib64/boost169 and pthread is separate from libc.
 $(PGLOAD): tools/pgload.cpp obj/PMTilesReader.o obj/TileSource.o
 	$(CXX) $(CFLAGS) $(INCLUDES) -o $@ tools/pgload.cpp obj/PMTilesReader.o obj/TileSource.o \
-		$(PREFIX_LDFLAGS) $(REQUIRED_LIBS) -lsmartmet-macgyver -lboost_program_options -lzstd -lz
+		$(PREFIX_LDFLAGS) $(filter -L%,$(LIBS)) $(REQUIRED_LIBS) -lsmartmet-macgyver \
+		-lboost_program_options -lzstd -lz -lpthread
 
 clean:
 	rm -f $(LIBFILE) $(PGLOAD) obj/* *~ $(SUBNAME)/*~
