@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.10.22
+Version: 26.10.23
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -117,7 +117,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
-* Thu Oct 22 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.22-1.fmi
+* Fri Oct 23 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.23-1.fmi
 - Datasets: the PMTiles files found in the configured directory (one dataset per
   subdirectory) are combined by resolution, each tile coming from the most detailed
   file and missing zoom levels from ancestor tiles; the directories are rescanned
