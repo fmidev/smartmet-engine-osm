@@ -203,10 +203,26 @@ for (const [name, base, colors] of [
 
 // Coastline overlays. The outline of the land polygons is the sea coastline; the
 // renderer does not stroke the edges where polygons are cut at tile boundaries.
-// Lakes are kind "lake" at low zooms (Natural Earth) and "water" from OSM.
+// Lakes are kind "lake" at low zooms (Natural Earth) and "water" from OSM. The OSM water
+// polygons include river and canal areas too, which kind_detail tells apart: only lake
+// shores are drawn, not river banks.
 
 const COASTLINE_WIDTH = ["interpolate", ["linear"], ["zoom"], 0, 0.5, 6, 0.8, 12, 1.2];
 const SHORE_WIDTH = ["interpolate", ["linear"], ["zoom"], 0, 0.4, 6, 0.6, 12, 1.0];
+const NOT_LAKES = ["river", "stream", "canal", "ditch", "drain", "basin"];
+const LAKE_FILTER = [
+  "all",
+  ["==", ["geometry-type"], "Polygon"],
+  [
+    "any",
+    ["==", ["get", "kind"], "lake"],
+    [
+      "all",
+      ["==", ["get", "kind"], "water"],
+      ["!", ["in", ["coalesce", ["get", "kind_detail"], ""], ["literal", NOT_LAKES]]],
+    ],
+  ],
+];
 
 function coastline(name, title, color, lakes) {
   const ls = [
@@ -224,7 +240,7 @@ function coastline(name, title, color, lakes) {
       type: "line",
       source: SOURCE,
       "source-layer": "water",
-      filter: ["in", ["get", "kind"], ["literal", ["lake", "water"]]],
+      filter: LAKE_FILTER,
       paint: { "line-color": color, "line-width": SHORE_WIDTH },
     });
   return {

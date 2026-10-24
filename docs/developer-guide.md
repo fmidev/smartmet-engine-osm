@@ -319,7 +319,7 @@ The `coastline-*` styles are transparent overlays to draw on top of weather data
 | Style | Content |
 |---|---|
 | `coastline-black`, `coastline-white`, `coastline-gray` | The sea coastline: the outline of the `earth` (land) polygons |
-| `coastline-lakes-black`, `coastline-lakes-white`, `coastline-lakes-gray` | The coastline and the shores of lakes and other inland water (`water` polygons of kind `lake` or `water`) |
+| `coastline-lakes-black`, `coastline-lakes-white`, `coastline-lakes-gray` | The coastline and the shores of lakes: `water` polygons of kind `lake` (Natural Earth, low zooms) or `water` (OSM), except river, stream, canal, ditch, drain and basin areas by `kind_detail` |
 
 The land and water polygons of the Protomaps builds come from the coastline-derived
 polygons of osmdata.openstreetmap.de, which are cut into pieces of 1x1 degrees. The cuts do

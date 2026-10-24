@@ -4,7 +4,7 @@
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
 Version: 26.10.24
-Release: 1%{?dist}.fmi
+Release: 2%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
 URL: https://github.com/fmidev/smartmet-engine-osm
@@ -117,6 +117,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Sat Oct 24 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.24-2.fmi
+- The coastline-lakes styles draw lake shores only, not the banks of river and canal areas
+
 * Sat Oct 24 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.24-1.fmi
 - New coastline-* styles: transparent overlays of the sea coastline, optionally with lake shores
 
