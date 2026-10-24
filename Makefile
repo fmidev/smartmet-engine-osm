@@ -85,7 +85,8 @@ install:
 	$(INSTALL_PROG) tools/smartmet-osm-update $(bindir)/smartmet-osm-update
 	$(INSTALL_PROG) $(PGLOAD) $(bindir)/smartmet-osm-pgload
 	@mkdir -p $(datadir)/smartmet/osm/styles
-	@for style in styles/protomaps-*.json styles/versatiles-*.json styles/meteo-*.json; do \
+	@for style in styles/protomaps-*.json styles/versatiles-*.json styles/meteo-*.json \
+	  styles/coastline-*.json; do \
 	  echo $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \
 	  $(INSTALL_DATA) $$style $(datadir)/smartmet/osm/styles/; \
 	done
