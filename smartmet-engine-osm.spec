@@ -3,8 +3,8 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.10.24
-Release: 2%{?dist}.fmi
+Version: 26.10.26
+Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
 URL: https://github.com/fmidev/smartmet-engine-osm
@@ -117,6 +117,10 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Mon Oct 26 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.26-1.fmi
+- Rendering, style expressions, colour parsing, case conversion, tile store scans, configuration and overzooming split into smaller functions
+- No use of a moved-from vector when splitting projected lines
+
 * Sat Oct 24 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.24-2.fmi
 - The coastline-lakes styles draw lake shores only, not the banks of river and canal areas
 

@@ -33,6 +33,7 @@
 #include <macgyver/Cache.h>
 #include <macgyver/CacheStats.h>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -126,8 +127,22 @@ class TileStore
 
   std::optional<Tile> findTile(const std::string& theDataset, uint8_t z, uint32_t x, uint32_t y);
 
+  using SourceList = std::vector<std::pair<std::shared_ptr<TileSource>, FileInfo>>;
+  using Sources = std::map<std::string, SourceList>;  // by dataset
+
   // The sources of each published dataset in the database
-  std::map<std::string, std::vector<std::pair<std::shared_ptr<TileSource>, FileInfo>>> scanDatabase();
+  Sources scanDatabase();
+
+  // The files of each dataset in the configured directories and files
+  std::map<std::string, std::vector<std::filesystem::path>> candidateFiles() const;
+
+  // Add the usable files to the sources of their datasets
+  void scanFiles(Sources& theSources);
+
+  std::shared_ptr<PMTilesReader> openReader(const std::filesystem::path& thePath,
+                                            const std::string& theSignature);
+  static Dataset makeDataset(const std::string& theName, SourceList& theSources);
+  static bool changed(const Datasets& theOld, const Datasets& theNew);
 
   struct TileSizeFunction
   {

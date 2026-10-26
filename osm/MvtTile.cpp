@@ -585,6 +585,64 @@ std::string encode(const Tile& tile)
 
 // ----------------------------------------------------------------------
 
+namespace
+{
+// Scale a part of the parent tile into the coordinates of the child tile
+Part scale_part(const Part& part, double scale, double ox, double oy)
+{
+  Part scaled;
+  scaled.reserve(part.size());
+  for (const auto& p : part)
+    scaled.push_back(Point{p.x * scale - ox, p.y * scale - oy});
+  return scaled;
+}
+
+// Clip a part to the child tile
+void clip_part(GeomType type, Part&& part, const Rect& rect, std::vector<Part>& parts)
+{
+  if (type == GeomType::Point)
+  {
+    if (rect.contains(part.front()))
+      parts.push_back(std::move(part));
+  }
+  else if (type == GeomType::LineString)
+    clipLine(part, rect, parts);
+  else if (type == GeomType::Polygon)
+  {
+    auto ring = clipRing(part, rect);
+    if (ring.size() >= 3)
+      parts.push_back(std::move(ring));
+  }
+}
+
+Layer overzoom_layer(const Layer& layer, int dz, uint32_t dx, uint32_t dy, double buffer)
+{
+  const double scale = std::ldexp(1.0, dz);
+
+  Layer out;
+  out.name = layer.name;
+  out.extent = layer.extent;
+  out.keys = layer.keys;
+  out.values = layer.values;
+
+  const double ox = static_cast<double>(dx) * layer.extent;
+  const double oy = static_cast<double>(dy) * layer.extent;
+  const Rect rect{-buffer, -buffer, layer.extent + buffer, layer.extent + buffer};
+
+  for (const auto& feature : layer.features)
+  {
+    Feature f;
+    f.type = feature.type;
+    f.tags = feature.tags;
+    for (const auto& part : feature.parts)
+      clip_part(feature.type, scale_part(part, scale, ox, oy), rect, f.parts);
+    if (!f.parts.empty())
+      out.features.push_back(std::move(f));
+  }
+  return out;
+}
+}  // namespace
+
 Tile overzoom(const Tile& tile, int dz, uint32_t dx, uint32_t dy, double buffer)
 {
   try
@@ -592,50 +650,10 @@ Tile overzoom(const Tile& tile, int dz, uint32_t dx, uint32_t dy, double buffer)
     if (dz <= 0)
       return tile;
 
-    const double scale = std::ldexp(1.0, dz);
     Tile result;
     for (const auto& layer : tile.layers)
     {
-      Layer out;
-      out.name = layer.name;
-      out.extent = layer.extent;
-      out.keys = layer.keys;
-      out.values = layer.values;
-
-      const double ox = static_cast<double>(dx) * layer.extent;
-      const double oy = static_cast<double>(dy) * layer.extent;
-      const Rect rect{-buffer, -buffer, layer.extent + buffer, layer.extent + buffer};
-
-      for (const auto& feature : layer.features)
-      {
-        Feature f;
-        f.type = feature.type;
-        f.tags = feature.tags;
-
-        for (const auto& part : feature.parts)
-        {
-          Part scaled;
-          scaled.reserve(part.size());
-          for (const auto& p : part)
-            scaled.push_back(Point{p.x * scale - ox, p.y * scale - oy});
-
-          if (feature.type == GeomType::Point)
-          {
-            if (rect.contains(scaled.front()))
-              f.parts.push_back(std::move(scaled));
-          }
-          else if (feature.type == GeomType::LineString)
-            clipLine(scaled, rect, f.parts);
-          else if (feature.type == GeomType::Polygon)
-          {
-            auto ring = clipRing(scaled, rect);
-            if (ring.size() >= 3)
-              f.parts.push_back(std::move(ring));
-          }
-        }
-        if (!f.parts.empty())
-          out.features.push_back(std::move(f));
-      }
+      auto out = overzoom_layer(layer, dz, dx, dy, buffer);
       if (!out.features.empty())
         result.layers.push_back(std::move(out));
     }

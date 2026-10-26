@@ -256,166 +256,17 @@ void TileStore::rescan()
   {
     std::lock_guard<std::mutex> scanlock(itsScanMutex);
 
-    // Collect the files of each dataset
-
-    std::map<std::string, std::vector<std::filesystem::path>> candidates;
-
-    const auto& root = itsConfig.directory();
-    if (!root.empty())
-    {
-      std::error_code ec;
-      for (const auto& entry : std::filesystem::directory_iterator(root, ec))
-      {
-        const auto& path = entry.path();
-        if (entry.is_directory(ec))
-        {
-          auto files = list_files(path);
-          if (!files.empty())
-            candidates[path.filename().string()] = std::move(files);
-        }
-        else if (is_pmtiles(path) && entry.is_regular_file(ec))
-          candidates[split_version(path.stem().string()).first].push_back(path);
-      }
-    }
-
-    // Explicitly configured datasets override directory datasets of the same name
-    for (const auto& [name, dc] : itsConfig.datasets())
-    {
-      std::vector<std::filesystem::path> files = dc.files;
-      if (!dc.directory.empty())
-      {
-        auto dirfiles = list_files(dc.directory);
-        files.insert(files.end(), dirfiles.begin(), dirfiles.end());
-      }
-      candidates[name] = std::move(files);
-    }
-
     auto old = snapshot();
-    std::map<std::string, OpenFile> openfiles;  // the files in use after this scan
-
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-    const auto min_age_ns = std::int64_t{itsConfig.minFileAge()} * 1000000000;
 
     // The sources of each dataset
     auto sources = scanDatabase();
-
-    for (auto& [name, files] : candidates)
-    {
-      sort_by_version(files);
-      std::set<std::string> done;  // series with a file in use
-
-      for (const auto& path : files)
-      {
-        if (done.count(series(path)) > 0)
-          continue;  // an older version
-
-        auto sig = signature(path);
-        if (!sig)
-          continue;
-
-        // Skip files which may still be being written
-        if (now_ns - sig->mtime_ns < min_age_ns)
-          continue;
-
-        // Reuse the reader if the file is unchanged and the reader works
-        const auto sigstr = sig->str(path);
-        std::shared_ptr<PMTilesReader> reader;
-        auto it = itsOpenFiles.find(path.string());
-        if (it != itsOpenFiles.end() && it->second.signature == sigstr &&
-            !it->second.reader->failed())
-          reader = it->second.reader;
-
-        if (!reader)
-        {
-          if (itsFailedFiles.count(sigstr) > 0)
-            continue;
-          try
-          {
-            reader = std::make_shared<PMTilesReader>(
-                path, itsConfig.leafCacheSize(), itsConfig.fileAccess());
-            if (reader->header().tileType != TileType::MVT)
-            {
-              std::cerr << fmt::format("OSM engine: {} does not contain vector tiles, ignored\n",
-                                       path.string());
-              itsFailedFiles.insert(sigstr);
-              continue;
-            }
-          }
-          catch (const std::exception& e)
-          {
-            std::cerr << fmt::format("OSM engine: failed to open {}: {}\n", path.string(), e.what());
-            itsFailedFiles.insert(sigstr);
-            continue;
-          }
-        }
-
-        done.insert(series(path));
-        openfiles[path.string()] = OpenFile{sigstr, reader};
-        sources[name].emplace_back(reader, file_info(*reader, *sig));
-      }
-    }
-
-    itsOpenFiles = std::move(openfiles);
+    scanFiles(sources);
 
     auto datasets = std::make_shared<Datasets>();
-
     for (auto& [name, list] : sources)
-    {
-      std::stable_sort(list.begin(),
-                       list.end(),
-                       [](const auto& a, const auto& b) { return more_detailed(a.second, b.second); });
+      datasets->emplace(name, makeDataset(name, list));
 
-      Dataset ds;
-      ds.info.name = name;
-      for (const auto& [source, info] : list)
-      {
-        ds.sources.push_back(source);
-        ds.info.files.push_back(info);
-      }
-
-      auto& info = ds.info;
-      info.minzoom = 255;
-      info.west = 180;
-      info.south = 90;
-      info.east = -180;
-      info.north = -90;
-      for (const auto& f : info.files)
-      {
-        info.minzoom = std::min(info.minzoom, f.minzoom);
-        info.maxzoom = std::max(info.maxzoom, f.maxzoom);
-        info.west = std::min(info.west, f.west);
-        info.south = std::min(info.south, f.south);
-        info.east = std::max(info.east, f.east);
-        info.north = std::max(info.north, f.north);
-        info.modified = std::max(info.modified, f.modified);
-      }
-      try
-      {
-        info.metadata = ds.sources.front()->metadata();
-      }
-      catch (...)
-      {
-        // Metadata is informational only
-      }
-
-      datasets->emplace(name, std::move(ds));
-    }
-
-    // Changed if any dataset has a different list of sources
-
-    bool changed = (old->size() != datasets->size());
-    for (const auto& [name, ds] : *datasets)
-    {
-      auto it = old->find(name);
-      if (changed || it == old->end() || it->second.sources != ds.sources)
-      {
-        changed = true;
-        break;
-      }
-    }
-
-    if (!changed)
+    if (!changed(*old, *datasets))
       return;
 
     std::lock_guard<std::mutex> lock(itsMutex);
@@ -439,6 +290,195 @@ void TileStore::rescan()
   {
     throw Fmi::Exception::Trace(BCP, "OSM TileStore::rescan failed");
   }
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief The files of each dataset in the configured directories and files
+ */
+// ----------------------------------------------------------------------
+
+std::map<std::string, std::vector<std::filesystem::path>> TileStore::candidateFiles() const
+{
+  std::map<std::string, std::vector<std::filesystem::path>> candidates;
+
+  const auto& root = itsConfig.directory();
+  if (!root.empty())
+  {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec))
+    {
+      const auto& path = entry.path();
+      if (entry.is_directory(ec))
+      {
+        auto files = list_files(path);
+        if (!files.empty())
+          candidates[path.filename().string()] = std::move(files);
+      }
+      else if (is_pmtiles(path) && entry.is_regular_file(ec))
+        candidates[split_version(path.stem().string()).first].push_back(path);
+    }
+  }
+
+  // Explicitly configured datasets override directory datasets of the same name
+  for (const auto& [name, dc] : itsConfig.datasets())
+  {
+    std::vector<std::filesystem::path> files = dc.files;
+    if (!dc.directory.empty())
+    {
+      auto dirfiles = list_files(dc.directory);
+      files.insert(files.end(), dirfiles.begin(), dirfiles.end());
+    }
+    candidates[name] = std::move(files);
+  }
+
+  return candidates;
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief Add the newest usable file of each series to the sources of its dataset
+ *
+ * Files which may still be being written are skipped.
+ */
+// ----------------------------------------------------------------------
+
+void TileStore::scanFiles(Sources& theSources)
+{
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+  const auto min_age_ns = std::int64_t{itsConfig.minFileAge()} * 1000000000;
+
+  std::map<std::string, OpenFile> openfiles;  // the files in use after this scan
+
+  for (auto& [name, files] : candidateFiles())
+  {
+    sort_by_version(files);
+    std::set<std::string> done;  // series with a file in use
+
+    for (const auto& path : files)
+    {
+      if (done.count(series(path)) > 0)
+        continue;  // an older version
+
+      auto sig = signature(path);
+      if (!sig || now_ns - sig->mtime_ns < min_age_ns)
+        continue;
+
+      const auto sigstr = sig->str(path);
+      auto reader = openReader(path, sigstr);
+      if (!reader)
+        continue;
+
+      done.insert(series(path));
+      openfiles[path.string()] = OpenFile{sigstr, reader};
+      theSources[name].emplace_back(reader, file_info(*reader, *sig));
+    }
+  }
+
+  itsOpenFiles = std::move(openfiles);
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief The reader of a file, null if the file cannot be used
+ *
+ * The reader is reused if the file is unchanged and the reader works.
+ */
+// ----------------------------------------------------------------------
+
+std::shared_ptr<PMTilesReader> TileStore::openReader(const std::filesystem::path& thePath,
+                                                     const std::string& theSignature)
+{
+  auto it = itsOpenFiles.find(thePath.string());
+  if (it != itsOpenFiles.end() && it->second.signature == theSignature &&
+      !it->second.reader->failed())
+    return it->second.reader;
+
+  if (itsFailedFiles.count(theSignature) > 0)
+    return nullptr;
+
+  try
+  {
+    auto reader =
+        std::make_shared<PMTilesReader>(thePath, itsConfig.leafCacheSize(), itsConfig.fileAccess());
+    if (reader->header().tileType == TileType::MVT)
+      return reader;
+    std::cerr << fmt::format("OSM engine: {} does not contain vector tiles, ignored\n",
+                             thePath.string());
+  }
+  catch (const std::exception& e)
+  {
+    std::cerr << fmt::format("OSM engine: failed to open {}: {}\n", thePath.string(), e.what());
+  }
+  itsFailedFiles.insert(theSignature);
+  return nullptr;
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief A dataset of the sources, the most detailed sources first
+ */
+// ----------------------------------------------------------------------
+
+TileStore::Dataset TileStore::makeDataset(const std::string& theName, SourceList& theSources)
+{
+  std::stable_sort(theSources.begin(),
+                   theSources.end(),
+                   [](const auto& a, const auto& b) { return more_detailed(a.second, b.second); });
+
+  Dataset ds;
+  ds.info.name = theName;
+  for (const auto& [source, info] : theSources)
+  {
+    ds.sources.push_back(source);
+    ds.info.files.push_back(info);
+  }
+
+  auto& info = ds.info;
+  info.minzoom = 255;
+  info.west = 180;
+  info.south = 90;
+  info.east = -180;
+  info.north = -90;
+  for (const auto& f : info.files)
+  {
+    info.minzoom = std::min(info.minzoom, f.minzoom);
+    info.maxzoom = std::max(info.maxzoom, f.maxzoom);
+    info.west = std::min(info.west, f.west);
+    info.south = std::min(info.south, f.south);
+    info.east = std::max(info.east, f.east);
+    info.north = std::max(info.north, f.north);
+    info.modified = std::max(info.modified, f.modified);
+  }
+  try
+  {
+    info.metadata = ds.sources.front()->metadata();
+  }
+  catch (...)
+  {
+    // Metadata is informational only
+  }
+  return ds;
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief True if any dataset has a different list of sources
+ */
+// ----------------------------------------------------------------------
+
+bool TileStore::changed(const Datasets& theOld, const Datasets& theNew)
+{
+  if (theOld.size() != theNew.size())
+    return true;
+  return std::any_of(theNew.begin(),
+                     theNew.end(),
+                     [&](const auto& item)
+                     {
+                       auto it = theOld.find(item.first);
+                       return it == theOld.end() || it->second.sources != item.second.sources;
+                     });
 }
 
 // ----------------------------------------------------------------------

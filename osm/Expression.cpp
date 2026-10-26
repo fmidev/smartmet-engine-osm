@@ -304,6 +304,7 @@ const std::map<std::string, Op> simple_ops = {{"!", Op::Not},
 using Scope = std::map<std::string, Expression>;
 
 Expression compile_expression(const Json::Value& json, const Scope& scope);
+Expression compile_value(const Json::Value& json, const Scope& scope);
 
 const std::set<std::string> special_ops = {"literal",
                                            "get",
@@ -357,125 +358,156 @@ Expression compile_value(const Json::Value& json, const Scope& scope)
   return literal(Value::fromJson(json));
 }
 
+Expression compile_get(const Json::Value& json, const Scope& /* scope */)
+{
+  const std::string name = json[0].asString();
+  if (json.size() == 2 && json[1].isString())
+  {
+    if (name == "get")
+      return get(json[1].asString());
+    return has(json[1].asString(), name == "!has");
+  }
+  warn(fmt::format("unsupported form of '{}'", name));
+  return literal(Value());
+}
+
+Expression compile_var(const Json::Value& json, const Scope& scope)
+{
+  auto it = scope.find(json[1].asString());
+  if (it != scope.end())
+    return it->second;
+  warn(fmt::format("unknown variable '{}'", json[1].asString()));
+  return literal(Value());
+}
+
+Expression compile_let(const Json::Value& json, const Scope& scope)
+{
+  const auto n = json.size();
+  Scope inner = scope;
+  for (Json::ArrayIndex i = 1; i + 1 < n; i += 2)
+    inner[json[i].asString()] = compile_value(json[i + 1], scope);
+  return compile_value(json[n - 1], inner);
+}
+
+Expression compile_format(const Json::Value& json, const Scope& scope)
+{
+  // Text sections and their formatting options alternate
+  std::vector<Expression> args;
+  for (Json::ArrayIndex i = 1; i < json.size(); i++)
+  {
+    if (!json[i].isObject())
+      args.push_back(compile_value(json[i], scope));
+  }
+  return make(Op::Concat, std::move(args));
+}
+
+// A label of match: a single value or an array of values
+std::vector<Value> match_labels(const Json::Value& json)
+{
+  std::vector<Value> labels;
+  if (json.isArray())
+    for (const auto& label : json)
+      labels.push_back(Value::fromJson(label));
+  else
+    labels.push_back(Value::fromJson(json));
+  return labels;
+}
+
+Expression compile_match(const Json::Value& json, const Scope& scope)
+{
+  // ["match", input, label1, output1, label2, output2, ..., fallback]
+  const auto n = json.size();
+  std::vector<Expression> args{compile_value(json[1], scope)};
+  std::vector<std::vector<Value>> labels;
+  for (Json::ArrayIndex i = 2; i + 1 < n; i += 2)
+  {
+    labels.push_back(match_labels(json[i]));
+    args.push_back(compile_value(json[i + 1], scope));
+  }
+  args.push_back(compile_value(json[n - 1], scope));
+  auto ret = make(Op::Match, std::move(args));
+  ret.itsLabels = std::move(labels);
+  return ret;
+}
+
+Expression compile_interpolate(const Json::Value& json, const Scope& scope)
+{
+  // ["interpolate", ["linear"|"exponential", base|"cubic-bezier",...], input, stop, out, ...]
+  double base = 1;
+  const auto& type = json[1];
+  if (type.isArray() && type.size() >= 2 && type[0].asString() == "exponential")
+    base = type[1].asDouble();
+  std::vector<Expression> args{compile_value(json[2], scope)};
+  std::vector<double> stops;
+  for (Json::ArrayIndex i = 3; i + 1 < json.size(); i += 2)
+  {
+    stops.push_back(json[i].asDouble());
+    args.push_back(compile_value(json[i + 1], scope));
+  }
+  auto ret = make(Op::Interpolate, std::move(args));
+  ret.itsStops = std::move(stops);
+  ret.itsBase = base;
+  return ret;
+}
+
+Expression compile_step(const Json::Value& json, const Scope& scope)
+{
+  // ["step", input, output0, stop1, output1, ...]
+  std::vector<Expression> args{compile_value(json[1], scope), compile_value(json[2], scope)};
+  std::vector<double> stops;
+  for (Json::ArrayIndex i = 3; i + 1 < json.size(); i += 2)
+  {
+    stops.push_back(json[i].asDouble());
+    args.push_back(compile_value(json[i + 1], scope));
+  }
+  auto ret = make(Op::Step, std::move(args));
+  ret.itsStops = std::move(stops);
+  return ret;
+}
+
+using Compiler = Expression (*)(const Json::Value& json, const Scope& scope);
+
+// The special operators with compilers of their own. Feature and rendering state
+// unknown to a static renderer are given constant values.
+const std::map<std::string, Compiler> special_compilers = {
+    {"literal",
+     [](const Json::Value& json, const Scope& /* scope */)
+     { return literal(json.size() > 1 ? Value::fromJson(json[1]) : Value()); }},
+    {"get", compile_get},
+    {"has", compile_get},
+    {"!has", compile_get},
+    {"zoom", [](const Json::Value& /* json */, const Scope& /* scope */) { return zoom(); }},
+    {"geometry-type",
+     [](const Json::Value& /* json */, const Scope& /* scope */) { return geometry_type(); }},
+    {"is-supported-script",
+     [](const Json::Value& /* json */, const Scope& /* scope */) { return literal(Value(true)); }},
+    {"resolved-locale",
+     [](const Json::Value& /* json */, const Scope& /* scope */)
+     { return literal(Value(std::string("en"))); }},
+    {"id",
+     [](const Json::Value& /* json */, const Scope& /* scope */) { return literal(Value()); }},
+    {"feature-state",
+     [](const Json::Value& /* json */, const Scope& /* scope */) { return literal(Value()); }},
+    {"collator",
+     [](const Json::Value& /* json */, const Scope& /* scope */) { return literal(Value()); }},
+    {"line-progress",
+     [](const Json::Value& /* json */, const Scope& /* scope */) { return literal(Value(0.0)); }},
+    {"var", compile_var},
+    {"let", compile_let},
+    {"format", compile_format},
+    {"match", compile_match},
+    {"interpolate", compile_interpolate},
+    {"interpolate-hcl", compile_interpolate},
+    {"interpolate-lab", compile_interpolate},
+    {"step", compile_step}};
+
 Expression compile_expression(const Json::Value& json, const Scope& scope)
 {
   const std::string name = json[0].asString();
-  const auto n = json.size();
 
-  if (name == "literal")
-    return literal(n > 1 ? Value::fromJson(json[1]) : Value());
-
-  if (name == "get" || name == "has" || name == "!has")
-  {
-    if (n == 2 && json[1].isString())
-    {
-      if (name == "get")
-        return get(json[1].asString());
-      return has(json[1].asString(), name == "!has");
-    }
-    warn(fmt::format("unsupported form of '{}'", name));
-    return literal(Value());
-  }
-
-  if (name == "zoom")
-    return zoom();
-  if (name == "geometry-type")
-    return geometry_type();
-  if (name == "is-supported-script")
-    return literal(Value(true));
-  if (name == "resolved-locale")
-    return literal(Value(std::string("en")));
-  if (name == "id" || name == "feature-state" || name == "collator")
-    return literal(Value());
-  if (name == "line-progress")
-    return literal(Value(0.0));
-
-  if (name == "var")
-  {
-    auto it = scope.find(json[1].asString());
-    if (it != scope.end())
-      return it->second;
-    warn(fmt::format("unknown variable '{}'", json[1].asString()));
-    return literal(Value());
-  }
-
-  if (name == "let")
-  {
-    Scope inner = scope;
-    for (Json::ArrayIndex i = 1; i + 1 < n; i += 2)
-      inner[json[i].asString()] = compile_value(json[i + 1], scope);
-    return compile_value(json[n - 1], inner);
-  }
-
-  if (name == "format")
-  {
-    // Text sections and their formatting options alternate
-    std::vector<Expression> args;
-    for (Json::ArrayIndex i = 1; i < n; i++)
-    {
-      if (json[i].isObject())
-        continue;
-      args.push_back(compile_value(json[i], scope));
-    }
-    return make(Op::Concat, std::move(args));
-  }
-
-  if (name == "match")
-  {
-    // ["match", input, label1, output1, label2, output2, ..., fallback]
-    std::vector<Expression> args{compile_value(json[1], scope)};
-    Expression e;
-    for (Json::ArrayIndex i = 2; i + 1 < n; i += 2)
-    {
-      std::vector<Value> labels;
-      if (json[i].isArray())
-        for (const auto& label : json[i])
-          labels.push_back(Value::fromJson(label));
-      else
-        labels.push_back(Value::fromJson(json[i]));
-      e.itsLabels.push_back(std::move(labels));
-      args.push_back(compile_value(json[i + 1], scope));
-    }
-    args.push_back(compile_value(json[n - 1], scope));
-    auto ret = make(Op::Match, std::move(args));
-    ret.itsLabels = std::move(e.itsLabels);
-    return ret;
-  }
-
-  if (name == "interpolate" || name == "interpolate-hcl" || name == "interpolate-lab")
-  {
-    // ["interpolate", ["linear"|"exponential", base|"cubic-bezier",...], input, stop, out, ...]
-    double base = 1;
-    const auto& type = json[1];
-    if (type.isArray() && type.size() >= 2 && type[0].asString() == "exponential")
-      base = type[1].asDouble();
-    std::vector<Expression> args{compile_value(json[2], scope)};
-    std::vector<double> stops;
-    for (Json::ArrayIndex i = 3; i + 1 < n; i += 2)
-    {
-      stops.push_back(json[i].asDouble());
-      args.push_back(compile_value(json[i + 1], scope));
-    }
-    auto ret = make(Op::Interpolate, std::move(args));
-    ret.itsStops = std::move(stops);
-    ret.itsBase = base;
-    return ret;
-  }
-
-  if (name == "step")
-  {
-    // ["step", input, output0, stop1, output1, ...]
-    std::vector<Expression> args{compile_value(json[1], scope), compile_value(json[2], scope)};
-    std::vector<double> stops;
-    for (Json::ArrayIndex i = 3; i + 1 < n; i += 2)
-    {
-      stops.push_back(json[i].asDouble());
-      args.push_back(compile_value(json[i + 1], scope));
-    }
-    auto ret = make(Op::Step, std::move(args));
-    ret.itsStops = std::move(stops);
-    return ret;
-  }
+  auto special = special_compilers.find(name);
+  if (special != special_compilers.end())
+    return special->second(json, scope);
 
   auto it = simple_ops.find(name);
   if (it == simple_ops.end())
@@ -485,7 +517,7 @@ Expression compile_expression(const Json::Value& json, const Scope& scope)
   }
 
   std::vector<Expression> args;
-  for (Json::ArrayIndex i = 1; i < n; i++)
+  for (Json::ArrayIndex i = 1; i < json.size(); i++)
     args.push_back(compile_value(json[i], scope));
   return make(it->second, std::move(args));
 }
@@ -702,10 +734,10 @@ std::optional<double> number_arg(const Expression& e, const Context& ctx)
 
 }  // namespace
 
-// Upper or lower case conversion of UTF-8 text for Latin, Greek and Cyrillic letters
-std::string changeCase(const std::string& s, bool upper)
+namespace
 {
-  // Decode
+std::vector<uint32_t> utf8_decode(const std::string& s)
+{
   std::vector<uint32_t> cps;
   for (std::size_t i = 0; i < s.size();)
   {
@@ -732,40 +764,12 @@ std::string changeCase(const std::string& s, bool upper)
     cps.push_back(cp);
     i += len;
   }
+  return cps;
+}
 
-  for (auto& cp : cps)
-  {
-    if (upper)
-    {
-      if ((cp >= 'a' && cp <= 'z') || (cp >= 0xE0 && cp <= 0xFE && cp != 0xF7) ||
-          (cp >= 0x3B1 && cp <= 0x3C9 && cp != 0x3C2) || (cp >= 0x430 && cp <= 0x44F))
-        cp -= 0x20;
-      else if (cp >= 0x450 && cp <= 0x45F)
-        cp -= 0x50;
-      else if (cp >= 0x100 && cp <= 0x17F && (cp & 1) == 1 && cp != 0x131 && cp != 0x138 &&
-               cp != 0x149 && !(cp >= 0x139 && cp <= 0x148) && !(cp >= 0x179 && cp <= 0x17E))
-        cp -= 1;
-      else if (((cp >= 0x139 && cp <= 0x148) || (cp >= 0x179 && cp <= 0x17E)) && (cp & 1) == 0)
-        cp -= 1;
-    }
-    else
-    {
-      if ((cp >= 'A' && cp <= 'Z') || (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) ||
-          (cp >= 0x391 && cp <= 0x3A9) || (cp >= 0x410 && cp <= 0x42F))
-        cp += 0x20;
-      else if (cp >= 0x400 && cp <= 0x40F)
-        cp += 0x50;
-      else if (cp >= 0x100 && cp <= 0x17F && (cp & 1) == 0 && cp != 0x130 && cp != 0x138 &&
-               !(cp >= 0x139 && cp <= 0x148) && !(cp >= 0x179 && cp <= 0x17E))
-        cp += 1;
-      else if (((cp >= 0x139 && cp <= 0x148) || (cp >= 0x179 && cp <= 0x17E)) && (cp & 1) == 1)
-        cp += 1;
-    }
-  }
-
-  // Encode
+std::string utf8_encode(const std::vector<uint32_t>& cps)
+{
   std::string out;
-  out.reserve(s.size());
   for (auto cp : cps)
   {
     if (cp < 0x80)
@@ -792,6 +796,55 @@ std::string changeCase(const std::string& s, bool upper)
   return out;
 }
 
+bool in_range(uint32_t cp, uint32_t first, uint32_t last)
+{
+  return cp >= first && cp <= last;
+}
+
+// Latin Extended-A letters come in upper/lower case pairs starting at even code
+// points, except in these two ranges where the pairs start at odd code points
+bool odd_case_pairs(uint32_t cp)
+{
+  return in_range(cp, 0x139, 0x148) || in_range(cp, 0x179, 0x17E);
+}
+
+uint32_t to_upper(uint32_t cp)
+{
+  if (in_range(cp, 'a', 'z') || (in_range(cp, 0xE0, 0xFE) && cp != 0xF7) ||
+      (in_range(cp, 0x3B1, 0x3C9) && cp != 0x3C2) || in_range(cp, 0x430, 0x44F))
+    return cp - 0x20;
+  if (in_range(cp, 0x450, 0x45F))
+    return cp - 0x50;
+  if (!in_range(cp, 0x100, 0x17F) || cp == 0x131 || cp == 0x138 || cp == 0x149)
+    return cp;
+  const bool lower = (odd_case_pairs(cp) ? (cp & 1) == 0 : (cp & 1) == 1);
+  return lower ? cp - 1 : cp;
+}
+
+uint32_t to_lower(uint32_t cp)
+{
+  if (in_range(cp, 'A', 'Z') || (in_range(cp, 0xC0, 0xDE) && cp != 0xD7) ||
+      in_range(cp, 0x391, 0x3A9) || in_range(cp, 0x410, 0x42F))
+    return cp + 0x20;
+  if (in_range(cp, 0x400, 0x40F))
+    return cp + 0x50;
+  if (!in_range(cp, 0x100, 0x17F) || cp == 0x130 || cp == 0x138)
+    return cp;
+  const bool upper = (odd_case_pairs(cp) ? (cp & 1) == 1 : (cp & 1) == 0);
+  return upper ? cp + 1 : cp;
+}
+
+}  // namespace
+
+// Upper or lower case conversion of UTF-8 text for Latin, Greek and Cyrillic letters
+std::string changeCase(const std::string& s, bool upper)
+{
+  auto cps = utf8_decode(s);
+  for (auto& cp : cps)
+    cp = (upper ? to_upper(cp) : to_lower(cp));
+  return utf8_encode(cps);
+}
+
 // ----------------------------------------------------------------------
 // Color
 // ----------------------------------------------------------------------
@@ -801,6 +854,92 @@ std::string Color::hex() const
   auto clamp = [](double v) { return static_cast<int>(std::lround(std::clamp(v, 0.0, 1.0) * 255)); };
   return fmt::format("#{:02x}{:02x}{:02x}", clamp(r), clamp(g), clamp(b));
 }
+
+namespace
+{
+// #rgb, #rgba, #rrggbb or #rrggbbaa
+std::optional<Color> parse_hex_color(const std::string& s)
+{
+  auto hexval = [&](std::size_t pos, std::size_t len)
+  { return std::stoi(s.substr(pos, len), nullptr, 16); };
+
+  Color c;
+  if (s.size() == 4 || s.size() == 5)
+  {
+    c.r = hexval(1, 1) * 17 / 255.0;
+    c.g = hexval(2, 1) * 17 / 255.0;
+    c.b = hexval(3, 1) * 17 / 255.0;
+    if (s.size() == 5)
+      c.a = hexval(4, 1) * 17 / 255.0;
+    return c;
+  }
+  if (s.size() == 7 || s.size() == 9)
+  {
+    c.r = hexval(1, 2) / 255.0;
+    c.g = hexval(3, 2) / 255.0;
+    c.b = hexval(5, 2) / 255.0;
+    if (s.size() == 9)
+      c.a = hexval(7, 2) / 255.0;
+    return c;
+  }
+  return {};
+}
+
+void set_hsl(Color& c, double hue, double saturation, double lightness)
+{
+  const double h = std::fmod(std::fmod(hue, 360) + 360, 360) / 360;
+  const double sat = saturation / 100;
+  const double l = lightness / 100;
+  if (sat == 0)
+  {
+    c.r = c.g = c.b = l;
+    return;
+  }
+  const double q = (l < 0.5 ? l * (1 + sat) : l + sat - l * sat);
+  const double p = 2 * l - q;
+  c.r = hue2rgb(p, q, h + 1.0 / 3);
+  c.g = hue2rgb(p, q, h);
+  c.b = hue2rgb(p, q, h - 1.0 / 3);
+}
+
+double rgb_component(double value, bool percent)
+{
+  return percent ? value / 100 : value / 255;
+}
+
+// rgb(), rgba(), hsl() or hsla()
+std::optional<Color> parse_color_function(const std::string& s)
+{
+  const auto open = s.find('(');
+  const auto close = s.rfind(')');
+  if (open == std::string::npos || close == std::string::npos || close < open)
+    return {};
+
+  const auto func = s.substr(0, open);
+  std::vector<bool> percent;
+  auto nums = parse_numbers(s.substr(open + 1, close - open - 1), percent);
+  if (nums.size() < 3)
+    return {};
+
+  Color c;
+  if (nums.size() >= 4)
+    c.a = percent[3] ? nums[3] / 100 : nums[3];
+
+  if (func == "rgb" || func == "rgba")
+  {
+    c.r = rgb_component(nums[0], percent[0]);
+    c.g = rgb_component(nums[1], percent[1]);
+    c.b = rgb_component(nums[2], percent[2]);
+    return c;
+  }
+  if (func == "hsl" || func == "hsla")
+  {
+    set_hsl(c, nums[0], nums[1], nums[2]);
+    return c;
+  }
+  return {};
+}
+}  // namespace
 
 std::optional<Color> parseColor(const std::string& theColor)
 {
@@ -822,71 +961,8 @@ std::optional<Color> parseColor(const std::string& theColor)
       s = named->second;
 
     if (s[0] == '#')
-    {
-      auto hexval = [&](std::size_t pos, std::size_t len)
-      { return std::stoi(s.substr(pos, len), nullptr, 16); };
-      Color c;
-      if (s.size() == 4 || s.size() == 5)
-      {
-        c.r = hexval(1, 1) * 17 / 255.0;
-        c.g = hexval(2, 1) * 17 / 255.0;
-        c.b = hexval(3, 1) * 17 / 255.0;
-        if (s.size() == 5)
-          c.a = hexval(4, 1) * 17 / 255.0;
-        return c;
-      }
-      if (s.size() == 7 || s.size() == 9)
-      {
-        c.r = hexval(1, 2) / 255.0;
-        c.g = hexval(3, 2) / 255.0;
-        c.b = hexval(5, 2) / 255.0;
-        if (s.size() == 9)
-          c.a = hexval(7, 2) / 255.0;
-        return c;
-      }
-      return {};
-    }
-
-    const auto open = s.find('(');
-    const auto close = s.rfind(')');
-    if (open == std::string::npos || close == std::string::npos || close < open)
-      return {};
-
-    const auto func = s.substr(0, open);
-    std::vector<bool> percent;
-    auto nums = parse_numbers(s.substr(open + 1, close - open - 1), percent);
-    if (nums.size() < 3)
-      return {};
-
-    Color c;
-    if (nums.size() >= 4)
-      c.a = percent[3] ? nums[3] / 100 : nums[3];
-
-    if (func == "rgb" || func == "rgba")
-    {
-      c.r = percent[0] ? nums[0] / 100 : nums[0] / 255;
-      c.g = percent[1] ? nums[1] / 100 : nums[1] / 255;
-      c.b = percent[2] ? nums[2] / 100 : nums[2] / 255;
-      return c;
-    }
-    if (func == "hsl" || func == "hsla")
-    {
-      const double h = std::fmod(std::fmod(nums[0], 360) + 360, 360) / 360;
-      const double sat = nums[1] / 100;
-      const double l = nums[2] / 100;
-      if (sat == 0)
-        c.r = c.g = c.b = l;
-      else
-      {
-        const double q = (l < 0.5 ? l * (1 + sat) : l + sat - l * sat);
-        const double p = 2 * l - q;
-        c.r = hue2rgb(p, q, h + 1.0 / 3);
-        c.g = hue2rgb(p, q, h);
-        c.b = hue2rgb(p, q, h - 1.0 / 3);
-      }
-      return c;
-    }
-    return {};
+      return parse_hex_color(s);
+    return parse_color_function(s);
   }
   catch (...)
   {
@@ -1040,278 +1116,377 @@ Expression Expression::compileFilter(const Json::Value& theJson)
   }
 }
 
+namespace
+{
+Value eval_get(const Expression& e, const Context& ctx)
+{
+  if (ctx.layer == nullptr || ctx.feature == nullptr)
+    return {};
+  const auto* v = ctx.layer->get(*ctx.feature, e.itsKey);
+  return v ? Value::fromProperty(*v) : Value();
+}
+
+Value eval_has(const Expression& e, const Context& ctx)
+{
+  bool found = (ctx.layer && ctx.feature && ctx.layer->get(*ctx.feature, e.itsKey) != nullptr);
+  return Value(e.itsOp == Op::Has ? found : !found);
+}
+
+Value eval_compare(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  if (args.size() < 2)
+    return Value(false);
+  return Value(compare(e.itsOp, args[0].evaluate(ctx), args[1].evaluate(ctx)));
+}
+
+// all, any and none
+Value eval_logical(const Expression& e, const Context& ctx)
+{
+  // all stops at the first false, any and none at the first true argument
+  const bool stop_at = (e.itsOp != Op::All);
+  for (const auto& a : e.itsArgs)
+    if (a.evaluate(ctx).truthy() == stop_at)
+      return Value(e.itsOp == Op::Any);
+  return Value(e.itsOp != Op::Any);
+}
+
+Value eval_in(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  if (args.size() < 2)
+    return Value(false);
+  auto needle = args[0].evaluate(ctx);
+  auto haystack = args[1].evaluate(ctx);
+  if (haystack.type == Value::Type::Array)
+    return Value(std::find(haystack.array.begin(), haystack.array.end(), needle) !=
+                 haystack.array.end());
+  if (haystack.type == Value::Type::String)
+    return Value(haystack.string.find(needle.toString()) != std::string::npos);
+  return Value(false);
+}
+
+Value eval_legacy_in(const Expression& e, const Context& ctx)
+{
+  auto v = e.itsArgs[0].evaluate(ctx);
+  const auto& values = e.itsLabels[0];
+  const bool found = (std::find(values.begin(), values.end(), v) != values.end());
+  return Value(e.itsOp == Op::LegacyIn ? found : !found);
+}
+
+Value eval_case(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  const auto n = args.size();
+  for (std::size_t i = 0; i + 1 < n; i += 2)
+    if (args[i].evaluate(ctx).truthy())
+      return args[i + 1].evaluate(ctx);
+  return n % 2 == 1 ? args[n - 1].evaluate(ctx) : Value();
+}
+
+Value eval_match(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  auto input = args[0].evaluate(ctx);
+  for (std::size_t i = 0; i < e.itsLabels.size(); i++)
+  {
+    const auto& labels = e.itsLabels[i];
+    if (std::find(labels.begin(), labels.end(), input) != labels.end())
+      return args[i + 1].evaluate(ctx);
+  }
+  return args.back().evaluate(ctx);
+}
+
+// The first non-null argument
+Value eval_coalesce(const Expression& e, const Context& ctx)
+{
+  for (const auto& a : e.itsArgs)
+  {
+    auto v = a.evaluate(ctx);
+    if (!v.isNull())
+      return v;
+  }
+  return {};
+}
+
+Value eval_interpolate(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  const auto& stops = e.itsStops;
+  auto x = number_arg(args[0], ctx);
+  if (!x || stops.empty())
+    return {};
+  if (*x <= stops.front())
+    return args[1].evaluate(ctx);
+  if (*x >= stops.back())
+    return args[stops.size()].evaluate(ctx);
+  std::size_t i = 0;
+  while (i + 1 < stops.size() && *x >= stops[i + 1])
+    ++i;
+  const double x0 = stops[i];
+  const double x1 = stops[i + 1];
+  double t = 0;
+  if (e.itsBase == 1)
+    t = (*x - x0) / (x1 - x0);
+  else
+    t = (std::pow(e.itsBase, *x - x0) - 1) / (std::pow(e.itsBase, x1 - x0) - 1);
+  return mix(args[i + 1].evaluate(ctx), args[i + 2].evaluate(ctx), t);
+}
+
+Value eval_step(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  auto x = number_arg(args[0], ctx);
+  if (!x)
+    return args[1].evaluate(ctx);
+  std::size_t i = 0;
+  while (i < e.itsStops.size() && *x >= e.itsStops[i])
+    ++i;
+  return args[i + 1].evaluate(ctx);
+}
+
+Value eval_geometry_type(const Context& ctx)
+{
+  if (ctx.feature == nullptr)
+    return {};
+  switch (ctx.feature->type)
+  {
+    case Mvt::GeomType::Point:
+      return Value(std::string("Point"));
+    case Mvt::GeomType::LineString:
+      return Value(std::string("LineString"));
+    case Mvt::GeomType::Polygon:
+      return Value(std::string("Polygon"));
+    default:
+      return {};
+  }
+}
+
+Value eval_concat(const Expression& e, const Context& ctx)
+{
+  std::string ret;
+  for (const auto& a : e.itsArgs)
+    ret += a.evaluate(ctx).toString();
+  return Value(ret);
+}
+
+Value eval_to_number(const Expression& e, const Context& ctx)
+{
+  for (const auto& a : e.itsArgs)
+  {
+    auto v = a.evaluate(ctx).toNumber();
+    if (v)
+      return Value(*v);
+  }
+  return Value(0.0);
+}
+
+Value eval_to_boolean(const Expression& e, const Context& ctx)
+{
+  if (e.itsArgs.empty())
+    return Value(false);
+  auto v = e.itsArgs[0].evaluate(ctx);
+  switch (v.type)
+  {
+    case Value::Type::Null:
+      return Value(false);
+    case Value::Type::Bool:
+      return v;
+    case Value::Type::Number:
+      return Value(v.number != 0 && !std::isnan(v.number));
+    case Value::Type::String:
+      return Value(!v.string.empty());
+    case Value::Type::Array:
+      return Value(true);
+  }
+  return Value(false);
+}
+
+Value eval_length(const Expression& e, const Context& ctx)
+{
+  if (e.itsArgs.empty())
+    return {};
+  auto v = e.itsArgs[0].evaluate(ctx);
+  if (v.type == Value::Type::String)
+    return Value(static_cast<double>(v.string.size()));
+  if (v.type == Value::Type::Array)
+    return Value(static_cast<double>(v.array.size()));
+  return {};
+}
+
+double accumulate(Op op, double acc, double v)
+{
+  switch (op)
+  {
+    case Op::Plus:
+      return acc + v;
+    case Op::Times:
+      return acc * v;
+    case Op::Min:
+      return std::min(acc, v);
+    default:
+      return std::max(acc, v);
+  }
+}
+
+// +, *, min and max of any number of arguments
+Value eval_fold(const Expression& e, const Context& ctx)
+{
+  std::optional<double> acc;
+  for (const auto& a : e.itsArgs)
+  {
+    auto v = number_arg(a, ctx);
+    if (!v)
+      return {};
+    acc = (acc ? accumulate(e.itsOp, *acc, *v) : *v);
+  }
+  return acc ? Value(*acc) : Value();
+}
+
+// -, /, % and ^, and unary minus
+Value eval_binary(const Expression& e, const Context& ctx)
+{
+  const auto& args = e.itsArgs;
+  if (args.size() == 1 && e.itsOp == Op::Minus)
+  {
+    auto v = number_arg(args[0], ctx);
+    return v ? Value(-*v) : Value();
+  }
+  if (args.size() < 2)
+    return {};
+  auto a = number_arg(args[0], ctx);
+  auto b = number_arg(args[1], ctx);
+  if (!a || !b)
+    return {};
+  switch (e.itsOp)
+  {
+    case Op::Minus:
+      return Value(*a - *b);
+    case Op::Divide:
+      return Value(*a / *b);
+    case Op::Mod:
+      return Value(std::fmod(*a, *b));
+    default:
+      return Value(std::pow(*a, *b));
+  }
+}
+
+double math_function(Op op, double v)
+{
+  switch (op)
+  {
+    case Op::Abs:
+      return std::abs(v);
+    case Op::Round:
+      return std::round(v);
+    case Op::Floor:
+      return std::floor(v);
+    case Op::Ceil:
+      return std::ceil(v);
+    case Op::Sqrt:
+      return std::sqrt(v);
+    case Op::Log10:
+      return std::log10(v);
+    case Op::Ln:
+      return std::log(v);
+    default:
+      return std::log2(v);
+  }
+}
+
+Value eval_math(const Expression& e, const Context& ctx)
+{
+  if (e.itsArgs.empty())
+    return {};
+  auto v = number_arg(e.itsArgs[0], ctx);
+  if (!v)
+    return {};
+  return Value(math_function(e.itsOp, *v));
+}
+
+Value eval_change_case(const Expression& e, const Context& ctx)
+{
+  if (e.itsArgs.empty())
+    return {};
+  return Value(changeCase(e.itsArgs[0].evaluate(ctx).toString(), e.itsOp == Op::Upcase));
+}
+
+Value eval_rgba(const Expression& e, const Context& ctx)
+{
+  std::vector<double> c;
+  for (const auto& a : e.itsArgs)
+    c.push_back(number_arg(a, ctx).value_or(0));
+  while (c.size() < 4)
+    c.push_back(1);
+  return Value(fmt::format("rgba({},{},{},{})", c[0], c[1], c[2], c[3]));
+}
+
+}  // namespace
+
 Value Expression::evaluate(const Context& ctx) const
 {
-  const auto& args = itsArgs;
-  const auto n = args.size();
-
   switch (itsOp)
   {
     case Op::Literal:
       return itsValue;
-
     case Op::Get:
-    {
-      if (ctx.layer == nullptr || ctx.feature == nullptr)
-        return {};
-      const auto* v = ctx.layer->get(*ctx.feature, itsKey);
-      return v ? Value::fromProperty(*v) : Value();
-    }
-
+      return eval_get(*this, ctx);
     case Op::Has:
     case Op::NotHas:
-    {
-      bool found = (ctx.layer && ctx.feature && ctx.layer->get(*ctx.feature, itsKey) != nullptr);
-      return Value(itsOp == Op::Has ? found : !found);
-    }
-
+      return eval_has(*this, ctx);
     case Op::Not:
-      return Value(n > 0 ? !args[0].evaluate(ctx).truthy() : true);
-
+      return Value(itsArgs.empty() || !itsArgs[0].evaluate(ctx).truthy());
     case Op::Eq:
     case Op::Ne:
     case Op::Lt:
     case Op::Le:
     case Op::Gt:
     case Op::Ge:
-      if (n < 2)
-        return Value(false);
-      return Value(compare(itsOp, args[0].evaluate(ctx), args[1].evaluate(ctx)));
-
+      return eval_compare(*this, ctx);
     case Op::All:
-      for (const auto& a : args)
-        if (!a.evaluate(ctx).truthy())
-          return Value(false);
-      return Value(true);
-
     case Op::Any:
-      for (const auto& a : args)
-        if (a.evaluate(ctx).truthy())
-          return Value(true);
-      return Value(false);
-
     case Op::None:
-      for (const auto& a : args)
-        if (a.evaluate(ctx).truthy())
-          return Value(false);
-      return Value(true);
-
+      return eval_logical(*this, ctx);
     case Op::In:
-    {
-      if (n < 2)
-        return Value(false);
-      auto needle = args[0].evaluate(ctx);
-      auto haystack = args[1].evaluate(ctx);
-      if (haystack.type == Value::Type::Array)
-        return Value(std::find(haystack.array.begin(), haystack.array.end(), needle) !=
-                     haystack.array.end());
-      if (haystack.type == Value::Type::String)
-        return Value(haystack.string.find(needle.toString()) != std::string::npos);
-      return Value(false);
-    }
-
+      return eval_in(*this, ctx);
     case Op::LegacyIn:
     case Op::LegacyNotIn:
-    {
-      auto v = args[0].evaluate(ctx);
-      const auto& values = itsLabels[0];
-      const bool found = (std::find(values.begin(), values.end(), v) != values.end());
-      return Value(itsOp == Op::LegacyIn ? found : !found);
-    }
-
+      return eval_legacy_in(*this, ctx);
     case Op::Case:
-    {
-      for (std::size_t i = 0; i + 1 < n; i += 2)
-        if (args[i].evaluate(ctx).truthy())
-          return args[i + 1].evaluate(ctx);
-      return n % 2 == 1 ? args[n - 1].evaluate(ctx) : Value();
-    }
-
+      return eval_case(*this, ctx);
     case Op::Match:
-    {
-      auto input = args[0].evaluate(ctx);
-      for (std::size_t i = 0; i < itsLabels.size(); i++)
-        for (const auto& label : itsLabels[i])
-          if (label == input)
-            return args[i + 1].evaluate(ctx);
-      return args[n - 1].evaluate(ctx);
-    }
-
+      return eval_match(*this, ctx);
     case Op::Coalesce:
-      for (const auto& a : args)
-      {
-        auto v = a.evaluate(ctx);
-        if (!v.isNull())
-          return v;
-      }
-      return {};
-
+    case Op::Assert:
+      return eval_coalesce(*this, ctx);
     case Op::Interpolate:
-    {
-      auto x = number_arg(args[0], ctx);
-      if (!x || itsStops.empty())
-        return {};
-      const auto& stops = itsStops;
-      if (*x <= stops.front())
-        return args[1].evaluate(ctx);
-      if (*x >= stops.back())
-        return args[stops.size()].evaluate(ctx);
-      std::size_t i = 0;
-      while (i + 1 < stops.size() && *x >= stops[i + 1])
-        ++i;
-      const double x0 = stops[i];
-      const double x1 = stops[i + 1];
-      double t = 0;
-      if (itsBase == 1)
-        t = (*x - x0) / (x1 - x0);
-      else
-        t = (std::pow(itsBase, *x - x0) - 1) / (std::pow(itsBase, x1 - x0) - 1);
-      return mix(args[i + 1].evaluate(ctx), args[i + 2].evaluate(ctx), t);
-    }
-
+      return eval_interpolate(*this, ctx);
     case Op::Step:
-    {
-      auto x = number_arg(args[0], ctx);
-      if (!x)
-        return args[1].evaluate(ctx);
-      std::size_t i = 0;
-      while (i < itsStops.size() && *x >= itsStops[i])
-        ++i;
-      return args[i + 1].evaluate(ctx);
-    }
-
+      return eval_step(*this, ctx);
     case Op::Zoom:
       return Value(ctx.zoom);
-
     case Op::GeometryType:
-    {
-      if (ctx.feature == nullptr)
-        return {};
-      switch (ctx.feature->type)
-      {
-        case Mvt::GeomType::Point:
-          return Value(std::string("Point"));
-        case Mvt::GeomType::LineString:
-          return Value(std::string("LineString"));
-        case Mvt::GeomType::Polygon:
-          return Value(std::string("Polygon"));
-        default:
-          return {};
-      }
-    }
-
+      return eval_geometry_type(ctx);
     case Op::Concat:
-    {
-      std::string ret;
-      for (const auto& a : args)
-        ret += a.evaluate(ctx).toString();
-      return Value(ret);
-    }
-
+      return eval_concat(*this, ctx);
     case Op::ToString:
-      return Value(n > 0 ? args[0].evaluate(ctx).toString() : std::string());
-
+      return Value(itsArgs.empty() ? std::string() : itsArgs[0].evaluate(ctx).toString());
     case Op::ToNumber:
-      for (const auto& a : args)
-      {
-        auto v = a.evaluate(ctx).toNumber();
-        if (v)
-          return Value(*v);
-      }
-      return Value(0.0);
-
+      return eval_to_number(*this, ctx);
     case Op::ToBoolean:
-    {
-      if (n == 0)
-        return Value(false);
-      auto v = args[0].evaluate(ctx);
-      switch (v.type)
-      {
-        case Value::Type::Null:
-          return Value(false);
-        case Value::Type::Bool:
-          return v;
-        case Value::Type::Number:
-          return Value(v.number != 0 && !std::isnan(v.number));
-        case Value::Type::String:
-          return Value(!v.string.empty());
-        case Value::Type::Array:
-          return Value(true);
-      }
-      return Value(false);
-    }
-
-    case Op::Assert:
-      for (const auto& a : args)
-      {
-        auto v = a.evaluate(ctx);
-        if (!v.isNull())
-          return v;
-      }
-      return {};
-
+      return eval_to_boolean(*this, ctx);
     case Op::Length:
-    {
-      if (n == 0)
-        return {};
-      auto v = args[0].evaluate(ctx);
-      if (v.type == Value::Type::String)
-        return Value(static_cast<double>(v.string.size()));
-      if (v.type == Value::Type::Array)
-        return Value(static_cast<double>(v.array.size()));
-      return {};
-    }
-
+      return eval_length(*this, ctx);
     case Op::Plus:
     case Op::Times:
     case Op::Min:
     case Op::Max:
-    {
-      std::optional<double> acc;
-      for (const auto& a : args)
-      {
-        auto v = number_arg(a, ctx);
-        if (!v)
-          return {};
-        if (!acc)
-          acc = *v;
-        else if (itsOp == Op::Plus)
-          *acc += *v;
-        else if (itsOp == Op::Times)
-          *acc *= *v;
-        else if (itsOp == Op::Min)
-          *acc = std::min(*acc, *v);
-        else
-          *acc = std::max(*acc, *v);
-      }
-      return acc ? Value(*acc) : Value();
-    }
-
+      return eval_fold(*this, ctx);
     case Op::Minus:
     case Op::Divide:
     case Op::Mod:
     case Op::Pow:
-    {
-      if (n == 1 && itsOp == Op::Minus)
-      {
-        auto v = number_arg(args[0], ctx);
-        return v ? Value(-*v) : Value();
-      }
-      if (n < 2)
-        return {};
-      auto a = number_arg(args[0], ctx);
-      auto b = number_arg(args[1], ctx);
-      if (!a || !b)
-        return {};
-      if (itsOp == Op::Minus)
-        return Value(*a - *b);
-      if (itsOp == Op::Divide)
-        return Value(*a / *b);
-      if (itsOp == Op::Mod)
-        return Value(std::fmod(*a, *b));
-      return Value(std::pow(*a, *b));
-    }
-
+      return eval_binary(*this, ctx);
     case Op::Abs:
     case Op::Round:
     case Op::Floor:
@@ -1320,50 +1495,12 @@ Value Expression::evaluate(const Context& ctx) const
     case Op::Log10:
     case Op::Ln:
     case Op::Log2:
-    {
-      if (n == 0)
-        return {};
-      auto v = number_arg(args[0], ctx);
-      if (!v)
-        return {};
-      switch (itsOp)
-      {
-        case Op::Abs:
-          return Value(std::abs(*v));
-        case Op::Round:
-          return Value(std::round(*v));
-        case Op::Floor:
-          return Value(std::floor(*v));
-        case Op::Ceil:
-          return Value(std::ceil(*v));
-        case Op::Sqrt:
-          return Value(std::sqrt(*v));
-        case Op::Log10:
-          return Value(std::log10(*v));
-        case Op::Ln:
-          return Value(std::log(*v));
-        default:
-          return Value(std::log2(*v));
-      }
-    }
-
+      return eval_math(*this, ctx);
     case Op::Upcase:
     case Op::Downcase:
-    {
-      if (n == 0)
-        return {};
-      return Value(changeCase(args[0].evaluate(ctx).toString(), itsOp == Op::Upcase));
-    }
-
+      return eval_change_case(*this, ctx);
     case Op::Rgba:
-    {
-      std::vector<double> c;
-      for (const auto& a : args)
-        c.push_back(number_arg(a, ctx).value_or(0));
-      while (c.size() < 4)
-        c.push_back(1);
-      return Value(fmt::format("rgba({},{},{},{})", c[0], c[1], c[2], c[3]));
-    }
+      return eval_rgba(*this, ctx);
   }
   return {};
 }

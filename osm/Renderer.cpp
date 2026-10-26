@@ -264,55 +264,68 @@ class Projector
 
     Grid grid;
     for (int n : {32, 128})
-    {
-      // Exactly projected grid nodes and cell centres in one call
-      const std::size_t nodes = static_cast<std::size_t>(n + 1) * (n + 1);
-      std::vector<double> x;
-      std::vector<double> y;
-      x.reserve(nodes + n * n);
-      y.reserve(nodes + n * n);
-      const double step = static_cast<double>(extent) / n;
-      for (int j = 0; j <= n; j++)
-        for (int i = 0; i <= n; i++)
-        {
-          x.push_back(i * step);
-          y.push_back(j * step);
-        }
-      for (int j = 0; j < n; j++)
-        for (int i = 0; i < n; i++)
-        {
-          x.push_back((i + 0.5) * step);
-          y.push_back((j + 0.5) * step);
-        }
-      exact(x, y, z, tx, ty, extent);
-
-      bool ok = std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); }) &&
-                std::all_of(y.begin(), y.end(), [](double v) { return std::isfinite(v); });
-
-      // Bilinear interpolation at a cell centre is the mean of its corners
-      for (int j = 0; ok && j < n; j++)
-        for (int i = 0; ok && i < n; i++)
-        {
-          const std::size_t p00 = static_cast<std::size_t>(j) * (n + 1) + i;
-          const std::size_t p01 = p00 + n + 1;
-          const std::size_t c = nodes + static_cast<std::size_t>(j) * n + i;
-          const double ix = (x[p00] + x[p00 + 1] + x[p01] + x[p01 + 1]) / 4;
-          const double iy = (y[p00] + y[p00 + 1] + y[p01] + y[p01 + 1]) / 4;
-          if (std::hypot(ix - x[c], iy - y[c]) > 0.2)
-            ok = false;
-        }
-
-      if (ok)
-      {
-        grid.n = n;
-        x.resize(nodes);
-        y.resize(nodes);
-        grid.x = std::move(x);
-        grid.y = std::move(y);
+      if (makeGrid(n, z, tx, ty, extent, grid))
         break;
-      }
-    }
     return itsGrids.emplace(key, std::move(grid)).first->second;
+  }
+
+  // A grid of n x n cells, false if interpolation would cause a visible error
+  bool makeGrid(int n, int z, uint32_t tx, uint32_t ty, uint32_t extent, Grid& grid) const
+  {
+    // Exactly projected grid nodes and cell centres in one call
+    const std::size_t nodes = static_cast<std::size_t>(n + 1) * (n + 1);
+    std::vector<double> x;
+    std::vector<double> y;
+    x.reserve(nodes + n * n);
+    y.reserve(nodes + n * n);
+    const double step = static_cast<double>(extent) / n;
+    for (int j = 0; j <= n; j++)
+      for (int i = 0; i <= n; i++)
+      {
+        x.push_back(i * step);
+        y.push_back(j * step);
+      }
+    for (int j = 0; j < n; j++)
+      for (int i = 0; i < n; i++)
+      {
+        x.push_back((i + 0.5) * step);
+        y.push_back((j + 0.5) * step);
+      }
+    exact(x, y, z, tx, ty, extent);
+
+    if (!allFinite(x) || !allFinite(y) || !interpolates(x, y, n))
+      return false;
+
+    grid.n = n;
+    x.resize(nodes);
+    y.resize(nodes);
+    grid.x = std::move(x);
+    grid.y = std::move(y);
+    return true;
+  }
+
+  static bool allFinite(const std::vector<double>& v)
+  {
+    return std::all_of(v.begin(), v.end(), [](double value) { return std::isfinite(value); });
+  }
+
+  // Do the grid nodes interpolate the cell centres stored after them accurately enough?
+  static bool interpolates(const std::vector<double>& x, const std::vector<double>& y, int n)
+  {
+    // Bilinear interpolation at a cell centre is the mean of its corners
+    const std::size_t nodes = static_cast<std::size_t>(n + 1) * (n + 1);
+    for (int j = 0; j < n; j++)
+      for (int i = 0; i < n; i++)
+      {
+        const std::size_t p00 = static_cast<std::size_t>(j) * (n + 1) + i;
+        const std::size_t p01 = p00 + n + 1;
+        const std::size_t c = nodes + static_cast<std::size_t>(j) * n + i;
+        const double ix = (x[p00] + x[p00 + 1] + x[p01] + x[p01 + 1]) / 4;
+        const double iy = (y[p00] + y[p00 + 1] + y[p01] + y[p01 + 1]) / 4;
+        if (std::hypot(ix - x[c], iy - y[c]) > 0.2)
+          return false;
+      }
+    return true;
   }
 
   const Fmi::Box& itsBox;
@@ -431,10 +444,12 @@ class PathBuilder
       if (std::isnan(x[i]) || std::isnan(y[i]))
       {
         // Lines are split at failed points, rings just lose them
-        if (!ring && projected.size() >= 2)
-          parts.push_back(std::move(projected));
         if (!ring)
+        {
+          if (projected.size() >= 2)
+            parts.push_back(std::move(projected));
           projected.clear();
+        }
         continue;
       }
       projected.push_back(Point{x[i], y[i]});
@@ -772,6 +787,210 @@ std::pair<double, double> anchor_position(const std::string& anchor)
 
 // ----------------------------------------------------------------------
 /*!
+ * \brief The layout and paint properties of a symbol layer
+ */
+// ----------------------------------------------------------------------
+
+struct SymbolProperties
+{
+  SymbolProperties(const StyleLayer& layer, const Context& zctx)
+      : textField(layer.layoutProperty("text-field"), zctx, Value()),
+        textSize(layer.layoutProperty("text-size"), zctx, Value(16.0)),
+        textFont(layer.layoutProperty("text-font"), zctx, Value()),
+        textTransform(layer.layoutProperty("text-transform"), zctx, Value(std::string("none"))),
+        textMaxWidth(layer.layoutProperty("text-max-width"), zctx, Value(10.0)),
+        letterSpacing(layer.layoutProperty("text-letter-spacing"), zctx, Value(0.0)),
+        textAnchor(layer.layoutProperty("text-anchor"), zctx, Value(std::string("center"))),
+        variableAnchor(layer.layoutProperty("text-variable-anchor"), zctx, Value()),
+        textOffset(layer.layoutProperty("text-offset"), zctx, Value()),
+        radialOffset(layer.layoutProperty("text-radial-offset"), zctx, Value(0.0)),
+        textPadding(layer.layoutProperty("text-padding"), zctx, Value(2.0)),
+        sortKey(layer.layoutProperty("symbol-sort-key"), zctx, Value(0.0)),
+        placement(layer.layoutProperty("symbol-placement"), zctx, Value(std::string("point"))),
+        iconImage(layer.layoutProperty("icon-image"), zctx, Value()),
+        iconSize(layer.layoutProperty("icon-size"), zctx, Value(1.0)),
+        textColor(layer.paintProperty("text-color"), zctx, Value(std::string("#000000"))),
+        textOpacity(layer.paintProperty("text-opacity"), zctx, Value(1.0)),
+        haloColor(
+            layer.paintProperty("text-halo-color"), zctx, Value(std::string("rgba(0,0,0,0)"))),
+        haloWidth(layer.paintProperty("text-halo-width"), zctx, Value(0.0))
+  {
+  }
+
+  Property textField;
+  Property textSize;
+  Property textFont;
+  Property textTransform;
+  Property textMaxWidth;
+  Property letterSpacing;
+  Property textAnchor;
+  Property variableAnchor;
+  Property textOffset;
+  Property radialOffset;
+  Property textPadding;
+  Property sortKey;
+  Property placement;
+  Property iconImage;
+  Property iconSize;
+  Property textColor;
+  Property textOpacity;
+  Property haloColor;
+  Property haloWidth;
+};
+
+// Size, line breaks, anchors and offsets of the label text
+void layout_text(const SymbolProperties& props,
+                 const Context& ctx,
+                 const std::string& text,
+                 Label& label)
+{
+  label.size = props.textSize.number(ctx);
+  label.letterSpacing = props.letterSpacing.number(ctx) * label.size;
+  label.padding = props.textPadding.number(ctx);
+  const double maxwidth = props.textMaxWidth.number(ctx);
+  label.lines = wrap(text, static_cast<std::size_t>(std::max(1.0, maxwidth / 0.55)));
+
+  auto anchors = props.variableAnchor(ctx);
+  if (anchors.type == Value::Type::Array && !anchors.array.empty())
+  {
+    for (const auto& a : anchors.array)
+      label.anchors.push_back(a.toString());
+    label.radial = props.radialOffset.number(ctx) * label.size;
+  }
+  else
+    label.anchors.push_back(props.textAnchor(ctx).toString());
+
+  auto offset = props.textOffset(ctx);
+  if (offset.type == Value::Type::Array && offset.array.size() == 2)
+  {
+    label.dx = offset.array[0].toNumber().value_or(0) * label.size;
+    label.dy = offset.array[1].toNumber().value_or(0) * label.size;
+  }
+}
+
+// Font attributes of a label, the family first
+void add_font(const Value& fonts,
+              const MapOptions& options,
+              double size,
+              std::vector<std::pair<std::string, std::string>>& attrs)
+{
+  std::string family = options.fontFamily;
+  if (fonts.type == Value::Type::Array && !fonts.array.empty())
+  {
+    auto [fam, weight, style] = font(fonts.array[0].toString());
+    if (options.fontFamily.compare(0, fam.size(), fam) != 0)
+      family = fam + ", " + options.fontFamily;
+    if (weight != "normal")
+      attrs.emplace_back("font-weight", weight);
+    if (style != "normal")
+      attrs.emplace_back("font-style", style);
+  }
+  attrs.emplace(attrs.begin(), "font-family", escape(family));
+  attrs.emplace(attrs.begin() + 1, "font-size", number(size, 1));
+}
+
+// Presentation attributes of the label text, false if the text is invisible
+bool style_text(const SymbolProperties& props,
+                const Context& ctx,
+                const MapOptions& options,
+                Label& label)
+{
+  auto& attrs = label.attributes;
+  add_font(props.textFont(ctx), options, label.size, attrs);
+  if (!add_color(attrs, "fill", props.textColor(ctx), props.textOpacity.number(ctx)))
+    return false;
+  const double halo = props.haloWidth.number(ctx);
+  if (halo > 0 && add_color(attrs, "stroke", props.haloColor(ctx), props.textOpacity.number(ctx)))
+  {
+    attrs.emplace_back("stroke-width", number(2 * halo, 2));
+    attrs.emplace_back("stroke-linejoin", "round");
+    attrs.emplace_back("paint-order", "stroke");
+  }
+  if (label.letterSpacing != 0)
+    attrs.emplace_back("letter-spacing", number(label.letterSpacing, 2));
+  return true;
+}
+
+// Icons are drawn as dots in the text colour
+void style_icon(const SymbolProperties& props, const Context& ctx, Label& label)
+{
+  label.icon = true;
+  label.iconRadius = std::max(1.5, 3.5 * props.iconSize.number(ctx));
+  auto c = parseColor(props.textColor(ctx).toString());
+  label.iconColor = c ? c->hex() : "#000000";
+  auto h = parseColor(props.haloColor(ctx).toString());
+  label.iconStroke = (h && h->a > 0 ? h->hex() : "none");
+}
+
+// The label of a point feature without its position, if it has one
+std::optional<Label> make_label(const SymbolProperties& props,
+                                const Context& ctx,
+                                const MapOptions& options)
+{
+  if (props.placement(ctx).toString() != "point")
+    return {};
+
+  std::string text = props.textField(ctx).toString();
+  const std::string icon = (options.icons ? props.iconImage(ctx).toString() : std::string());
+  if (text.empty() && icon.empty())
+    return {};
+
+  const auto transform = props.textTransform(ctx).toString();
+  if (transform == "uppercase" || transform == "lowercase")
+    text = changeCase(text, transform == "uppercase");
+
+  Label label;
+  label.sortKey = props.sortKey.number(ctx);
+  layout_text(props, ctx, text, label);
+  if (!style_text(props, ctx, options, label))
+    return {};
+  if (!icon.empty())
+    style_icon(props, ctx, label);
+  if (text.empty())
+    label.lines.clear();
+  return label;
+}
+
+// Does the point belong to the clip areas of the tile? Each point belongs to exactly one area.
+bool owns(const TileWork& work, const Point& p, uint32_t extent)
+{
+  return std::any_of(work.clips.begin(),
+                     work.clips.end(),
+                     [&](const Rect& clip)
+                     {
+                       return p.x >= clip.xmin * extent && p.x < clip.xmax * extent &&
+                              p.y >= clip.ymin * extent && p.y < clip.ymax * extent;
+                     });
+}
+
+// Add the label at each point of the feature
+void add_point_labels(const Label& label,
+                      const Mvt::Feature& feature,
+                      const TileWork& work,
+                      uint32_t extent,
+                      const PathBuilder& builder,
+                      std::vector<Label>& labels)
+{
+  for (const auto& part : feature.parts)
+  {
+    const auto& p = part.front();
+    if (!owns(work, p, extent))
+      continue;
+
+    auto pixel = builder.point(p, work, extent);
+    if (!pixel)
+      continue;
+
+    Label positioned = label;
+    positioned.x = pixel->x;
+    positioned.y = pixel->y;
+    positioned.sequence = labels.size();
+    labels.push_back(std::move(positioned));
+  }
+}
+
+// ----------------------------------------------------------------------
+/*!
  * \brief Collect the label candidates of a symbol layer
  */
 // ----------------------------------------------------------------------
@@ -784,33 +1003,13 @@ void collect_labels(const StyleLayer& layer,
                     const MapOptions& options,
                     std::vector<Label>& labels)
 {
-  const Context zctx{zoom, nullptr, nullptr};
-  Property textField(layer.layoutProperty("text-field"), zctx, Value());
-  Property textSize(layer.layoutProperty("text-size"), zctx, Value(16.0));
-  Property textFont(layer.layoutProperty("text-font"), zctx, Value());
-  Property textTransform(layer.layoutProperty("text-transform"), zctx, Value(std::string("none")));
-  Property textMaxWidth(layer.layoutProperty("text-max-width"), zctx, Value(10.0));
-  Property letterSpacing(layer.layoutProperty("text-letter-spacing"), zctx, Value(0.0));
-  Property textAnchor(layer.layoutProperty("text-anchor"), zctx, Value(std::string("center")));
-  Property variableAnchor(layer.layoutProperty("text-variable-anchor"), zctx, Value());
-  Property textOffset(layer.layoutProperty("text-offset"), zctx, Value());
-  Property radialOffset(layer.layoutProperty("text-radial-offset"), zctx, Value(0.0));
-  Property textPadding(layer.layoutProperty("text-padding"), zctx, Value(2.0));
-  Property sortKey(layer.layoutProperty("symbol-sort-key"), zctx, Value(0.0));
-  Property placement(layer.layoutProperty("symbol-placement"), zctx, Value(std::string("point")));
-  Property iconImage(layer.layoutProperty("icon-image"), zctx, Value());
-  Property iconSize(layer.layoutProperty("icon-size"), zctx, Value(1.0));
-  Property textColor(layer.paintProperty("text-color"), zctx, Value(std::string("#000000")));
-  Property textOpacity(layer.paintProperty("text-opacity"), zctx, Value(1.0));
-  Property haloColor(layer.paintProperty("text-halo-color"), zctx, Value(std::string("rgba(0,0,0,0)")));
-  Property haloWidth(layer.paintProperty("text-halo-width"), zctx, Value(0.0));
+  const SymbolProperties props(layer, Context{zoom, nullptr, nullptr});
 
   for (const auto& work : works)
   {
     const auto* mvtlayer = work.tile->layer(layer.sourceLayer);
     if (mvtlayer == nullptr)
       continue;
-    const auto extent = mvtlayer->extent;
 
     for (const auto& feature : mvtlayer->features)
     {
@@ -820,113 +1019,173 @@ void collect_labels(const StyleLayer& layer,
       const Context ctx{zoom, mvtlayer, &feature};
       if (layer.filter && !layer.filter->evaluate(ctx).truthy())
         continue;
-      if (placement(ctx).toString() != "point")
+
+      auto label = make_label(props, ctx, options);
+      if (!label)
         continue;
-
-      std::string text = textField(ctx).toString();
-      const std::string icon = (options.icons ? iconImage(ctx).toString() : std::string());
-      if (text.empty() && icon.empty())
-        continue;
-
-      const auto transform = textTransform(ctx).toString();
-      if (transform == "uppercase" || transform == "lowercase")
-        text = changeCase(text, transform == "uppercase");
-
-      for (const auto& part : feature.parts)
-      {
-        const auto& p = part.front();
-        // Each point belongs to exactly one clip area
-        bool owned = false;
-        for (const auto& clip : work.clips)
-          if (p.x >= clip.xmin * extent && p.x < clip.xmax * extent && p.y >= clip.ymin * extent &&
-              p.y < clip.ymax * extent)
-            owned = true;
-        if (!owned)
-          continue;
-
-        auto pixel = builder.point(p, work, extent);
-        if (!pixel)
-          continue;
-
-        Label label;
-        label.layer = layerIndex;
-        label.layerId = layer.id;
-        label.sortKey = sortKey.number(ctx);
-        label.x = pixel->x;
-        label.y = pixel->y;
-        label.size = textSize.number(ctx);
-        label.letterSpacing = letterSpacing.number(ctx) * label.size;
-        label.padding = textPadding.number(ctx);
-        const double maxwidth = textMaxWidth.number(ctx);
-        label.lines = wrap(text, static_cast<std::size_t>(std::max(1.0, maxwidth / 0.55)));
-
-        auto anchors = variableAnchor(ctx);
-        if (anchors.type == Value::Type::Array && !anchors.array.empty())
-        {
-          for (const auto& a : anchors.array)
-            label.anchors.push_back(a.toString());
-          label.radial = radialOffset.number(ctx) * label.size;
-        }
-        else
-          label.anchors.push_back(textAnchor(ctx).toString());
-
-        auto offset = textOffset(ctx);
-        if (offset.type == Value::Type::Array && offset.array.size() == 2)
-        {
-          label.dx = offset.array[0].toNumber().value_or(0) * label.size;
-          label.dy = offset.array[1].toNumber().value_or(0) * label.size;
-        }
-
-        // Presentation attributes
-        auto& attrs = label.attributes;
-        std::string family = options.fontFamily;
-        auto fonts = textFont(ctx);
-        if (fonts.type == Value::Type::Array && !fonts.array.empty())
-        {
-          auto [fam, weight, style] = font(fonts.array[0].toString());
-          if (options.fontFamily.compare(0, fam.size(), fam) != 0)
-            family = fam + ", " + options.fontFamily;
-          if (weight != "normal")
-            attrs.emplace_back("font-weight", weight);
-          if (style != "normal")
-            attrs.emplace_back("font-style", style);
-        }
-        attrs.emplace(attrs.begin(), "font-family", escape(family));
-        attrs.emplace(attrs.begin() + 1, "font-size", number(label.size, 1));
-        const auto color = textColor(ctx);
-        if (!add_color(attrs, "fill", color, textOpacity.number(ctx)))
-          continue;
-        const double halo = haloWidth.number(ctx);
-        if (halo > 0)
-        {
-          if (add_color(attrs, "stroke", haloColor(ctx), textOpacity.number(ctx)))
-          {
-            attrs.emplace_back("stroke-width", number(2 * halo, 2));
-            attrs.emplace_back("stroke-linejoin", "round");
-            attrs.emplace_back("paint-order", "stroke");
-          }
-        }
-        if (label.letterSpacing != 0)
-          attrs.emplace_back("letter-spacing", number(label.letterSpacing, 2));
-
-        if (!icon.empty())
-        {
-          label.icon = true;
-          label.iconRadius = std::max(1.5, 3.5 * iconSize.number(ctx));
-          auto c = parseColor(color.toString());
-          label.iconColor = c ? c->hex() : "#000000";
-          auto h = parseColor(haloColor(ctx).toString());
-          label.iconStroke = (h && h->a > 0 ? h->hex() : "none");
-        }
-        if (text.empty())
-          label.lines.clear();
-
-        label.sequence = labels.size();
-        labels.push_back(std::move(label));
-      }
+      label->layer = layerIndex;
+      label->layerId = layer.id;
+      add_point_labels(*label, feature, work, mvtlayer->extent, builder, labels);
     }
   }
 }
+
+// Offset of a radially placed text: away from the anchor point along one axis
+double radial_offset(double anchor, double radial)
+{
+  if (anchor == 0)
+    return radial;
+  if (anchor == 1)
+    return -radial;
+  return 0;
+}
+
+// Offset of the text from the anchor point
+std::pair<double, double> anchor_offset(const Label& label,
+                                        const std::string& anchor,
+                                        double h,
+                                        double v)
+{
+  if (label.radial != 0 && anchor != "center")
+    return {radial_offset(h, label.radial), radial_offset(v, label.radial)};
+  if (label.icon && anchor == "center" && label.dx == 0 && label.dy == 0)
+    return {label.dx, label.iconRadius + 0.6 * label.size};  // keep the dot visible
+  return {label.dx, label.dy};
+}
+
+std::string text_anchor(double h)
+{
+  if (h == 0)
+    return "start";
+  if (h == 1)
+    return "end";
+  return "middle";
+}
+
+SceneElement icon_element(const Label& label)
+{
+  return SceneElement{"circle",
+                      label.layerId,
+                      {{"cx", number(label.x, 1)},
+                       {"cy", number(label.y, 1)},
+                       {"r", number(label.iconRadius, 1)},
+                       {"fill", label.iconColor},
+                       {"stroke", label.iconStroke}},
+                      ""};
+}
+
+// SVG text anchored horizontally by text-anchor, vertically by the baseline
+SceneElement text_element(
+    const Label& label, double x, double baseline, double lineheight, double h)
+{
+  SceneElement text;
+  text.tag = "text";
+  text.layer = label.layerId;
+  text.attributes.emplace_back("x", number(x, 1));
+  text.attributes.emplace_back("y", number(baseline, 1));
+  text.attributes.emplace_back("text-anchor", text_anchor(h));
+  text.attributes.insert(text.attributes.end(), label.attributes.begin(), label.attributes.end());
+  if (label.lines.size() == 1)
+    text.content = escape(label.lines[0]);
+  else
+  {
+    for (std::size_t i = 0; i < label.lines.size(); i++)
+      text.content += fmt::format("<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
+                                  number(x, 1),
+                                  i == 0 ? "0" : number(lineheight, 1),
+                                  escape(label.lines[i]));
+  }
+  return text;
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief Places labels avoiding collisions
+ */
+// ----------------------------------------------------------------------
+
+class LabelPlacer
+{
+ public:
+  explicit LabelPlacer(Scene& scene)
+      : itsScene(scene),
+        itsImage{0, 0, static_cast<double>(scene.width), static_cast<double>(scene.height)}
+  {
+  }
+
+  void place(const Label& label)
+  {
+    std::optional<Box2> iconbox;
+    if (label.icon)
+    {
+      const double r = label.iconRadius + 1;
+      iconbox = Box2{label.x - r, label.y - r, label.x + r, label.y + r};
+      if (!isFree(*iconbox))
+        return;
+    }
+
+    if (label.lines.empty())
+    {
+      if (iconbox)
+        addIcon(label, *iconbox);
+      return;
+    }
+
+    for (const auto& anchor : label.anchors)
+      if (placeText(label, anchor, iconbox))
+        return;
+  }
+
+ private:
+  bool isFree(const Box2& b) const
+  {
+    if (b.x1 < itsImage.x1 || b.y1 < itsImage.y1 || b.x2 > itsImage.x2 || b.y2 > itsImage.y2)
+      return false;
+    return std::none_of(
+        itsPlaced.begin(), itsPlaced.end(), [&](const Box2& p) { return p.overlaps(b); });
+  }
+
+  void addIcon(const Label& label, const Box2& iconbox)
+  {
+    itsPlaced.push_back(iconbox);
+    itsScene.elements.push_back(icon_element(label));
+  }
+
+  // Place the text at the anchor if there is room
+  bool placeText(const Label& label, const std::string& anchor, const std::optional<Box2>& iconbox)
+  {
+    std::size_t maxchars = 0;
+    for (const auto& line : label.lines)
+      maxchars = std::max(maxchars, utf8_length(line));
+    const double width = maxchars * (0.55 * label.size + label.letterSpacing);
+    const double lineheight = 1.2 * label.size;
+    const double height = label.lines.size() * lineheight;
+
+    auto [h, v] = anchor_position(anchor);
+    auto [ox, oy] = anchor_offset(label, anchor, h, v);
+
+    const double left = label.x + ox - h * width;
+    const double top = label.y + oy - v * height;
+    const Box2 box{left - label.padding,
+                   top - label.padding,
+                   left + width + label.padding,
+                   top + height + label.padding};
+    if (!isFree(box))
+      return false;
+
+    itsPlaced.push_back(box);
+    if (iconbox)
+      addIcon(label, *iconbox);
+
+    itsScene.elements.push_back(
+        text_element(label, left + h * width, top + 0.8 * label.size, lineheight, h));
+    return true;
+  }
+
+  Scene& itsScene;
+  Box2 itsImage;
+  std::vector<Box2> itsPlaced;
+};
 
 // ----------------------------------------------------------------------
 /*!
@@ -948,113 +1207,9 @@ void place_labels(std::vector<Label>& labels, Scene& scene)
                      return a.sequence < b.sequence;
                    });
 
-  const Box2 image{0, 0, static_cast<double>(scene.width), static_cast<double>(scene.height)};
-  std::vector<Box2> placed;
-
-  auto free = [&](const Box2& b)
-  {
-    if (b.x1 < image.x1 || b.y1 < image.y1 || b.x2 > image.x2 || b.y2 > image.y2)
-      return false;
-    return std::none_of(placed.begin(), placed.end(), [&](const Box2& p) { return p.overlaps(b); });
-  };
-
+  LabelPlacer placer(scene);
   for (const auto& label : labels)
-  {
-    std::size_t maxchars = 0;
-    for (const auto& line : label.lines)
-      maxchars = std::max(maxchars, utf8_length(line));
-    const double width = maxchars * (0.55 * label.size + label.letterSpacing);
-    const double lineheight = 1.2 * label.size;
-    const double height = label.lines.size() * lineheight;
-
-    std::optional<Box2> iconbox;
-    if (label.icon)
-    {
-      const double r = label.iconRadius + 1;
-      iconbox = Box2{label.x - r, label.y - r, label.x + r, label.y + r};
-      if (!free(*iconbox))
-        continue;
-    }
-
-    if (label.lines.empty())
-    {
-      if (iconbox)
-      {
-        placed.push_back(*iconbox);
-        scene.elements.push_back(SceneElement{"circle",
-                                              label.layerId,
-                                              {{"cx", number(label.x, 1)},
-                                               {"cy", number(label.y, 1)},
-                                               {"r", number(label.iconRadius, 1)},
-                                               {"fill", label.iconColor},
-                                               {"stroke", label.iconStroke}},
-                                              ""});
-      }
-      continue;
-    }
-
-    for (const auto& anchor : label.anchors)
-    {
-      auto [h, v] = anchor_position(anchor);
-
-      // Offset away from the anchor point
-      double ox = label.dx;
-      double oy = label.dy;
-      if (label.radial != 0 && anchor != "center")
-      {
-        ox = (h == 0 ? label.radial : (h == 1 ? -label.radial : 0));
-        oy = (v == 0 ? label.radial : (v == 1 ? -label.radial : 0));
-      }
-      else if (label.icon && anchor == "center" && label.dx == 0 && label.dy == 0)
-        oy = label.iconRadius + 0.6 * label.size;  // keep the dot visible
-
-      const double left = label.x + ox - h * width;
-      const double top = label.y + oy - v * height;
-      const Box2 box{left - label.padding,
-                     top - label.padding,
-                     left + width + label.padding,
-                     top + height + label.padding};
-      if (!free(box))
-        continue;
-
-      placed.push_back(box);
-      if (iconbox)
-      {
-        placed.push_back(*iconbox);
-        scene.elements.push_back(SceneElement{"circle",
-                                              label.layerId,
-                                              {{"cx", number(label.x, 1)},
-                                               {"cy", number(label.y, 1)},
-                                               {"r", number(label.iconRadius, 1)},
-                                               {"fill", label.iconColor},
-                                               {"stroke", label.iconStroke}},
-                                              ""});
-      }
-
-      // SVG text anchored horizontally by text-anchor, vertically by the baseline
-      const double tx = left + h * width;
-      const double baseline = top + 0.8 * label.size;
-      SceneElement text;
-      text.tag = "text";
-      text.layer = label.layerId;
-      text.attributes.emplace_back("x", number(tx, 1));
-      text.attributes.emplace_back("y", number(baseline, 1));
-      text.attributes.emplace_back("text-anchor", h == 0 ? "start" : (h == 1 ? "end" : "middle"));
-      text.attributes.insert(text.attributes.end(), label.attributes.begin(), label.attributes.end());
-      if (label.lines.size() == 1)
-        text.content = escape(label.lines[0]);
-      else
-      {
-        for (std::size_t i = 0; i < label.lines.size(); i++)
-          text.content += fmt::format("<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
-                                      number(tx, 1),
-                                      i == 0 ? "0" : number(lineheight, 1),
-                                      escape(label.lines[i]));
-      }
-      scene.elements.push_back(std::move(text));
-      break;
-    }
-  }
+    placer.place(label);
 }
 
 std::string strip_tags(const std::string& html)
@@ -1075,6 +1230,436 @@ std::string strip_tags(const std::string& html)
   if (pos != std::string::npos)
     ret.replace(pos, 6, "©");
   return ret;
+}
+
+// Attribution from the metadata of a dataset
+std::string dataset_attribution(const DatasetInfo& info)
+{
+  Json::Value meta;
+  Json::CharReaderBuilder builder;
+  std::string errors;
+  std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+  const auto& m = info.metadata;
+  std::string attribution;
+  if (!m.empty() && reader->parse(m.data(), m.data() + m.size(), &meta, &errors))
+    attribution = strip_tags(meta.get("attribution", "").asString());
+  if (attribution.empty())
+    attribution = "© OpenStreetMap";
+  return attribution;
+}
+
+// Resolution in EPSG:3857 metres per pixel at the pixel, if it can be calculated
+std::optional<double> mercator_resolution(
+    const Fmi::Box& box,
+    const std::optional<Fmi::CoordinateTransformation>& toMercator,
+    double px,
+    double py)
+{
+  std::vector<double> x{px, px + 1, px};
+  std::vector<double> y{py, py, py + 1};
+  for (std::size_t i = 0; i < 3; i++)
+    box.itransform(x[i], y[i]);
+  if (toMercator)
+    toMercator->transform(x, y);
+  const double d1 = std::hypot(x[1] - x[0], y[1] - y[0]);
+  const double d2 = std::hypot(x[2] - x[0], y[2] - y[0]);
+  if (std::isfinite(d1) && std::isfinite(d2) && d1 > 0 && d2 > 0)
+    return std::sqrt(d1 * d2);
+  return {};
+}
+
+// The style zoom level from the resolution near the center of the image
+std::optional<double> style_zoom(const MapOptions& options,
+                                 const Fmi::SpatialReference& crs,
+                                 const Fmi::Box& box)
+{
+  if (options.zoom)
+    return std::clamp(*options.zoom, 0.0, 24.0);
+
+  std::optional<Fmi::CoordinateTransformation> toMercator;
+  auto epsg = crs.getEPSG();
+  if (!epsg || *epsg != 3857)
+    toMercator.emplace(crs, Fmi::SpatialReference("EPSG:3857"));
+
+  const auto W = static_cast<double>(box.width());
+  const auto H = static_cast<double>(box.height());
+  for (double f : {0.5, 0.25, 0.75, 0.1, 0.9})
+    for (double g : {0.5, 0.25, 0.75, 0.1, 0.9})
+      if (auto resolution = mercator_resolution(box, toMercator, W * f, H * g))
+      {
+        const double zoom = std::log2(2 * kHalf / (kTileSize * *resolution)) + options.zoomOffset;
+        return std::clamp(zoom, 0.0, 24.0);
+      }
+  return {};
+}
+
+// Longitudes and latitudes of points sampling the image and its margin
+std::pair<std::vector<double>, std::vector<double>> sample_image(const Fmi::SpatialReference& crs,
+                                                                 const Fmi::Box& box,
+                                                                 double margin)
+{
+  const auto W = static_cast<double>(box.width());
+  const auto H = static_cast<double>(box.height());
+  const double m = margin;
+  const double step = 16;
+
+  std::vector<double> lon;
+  std::vector<double> lat;
+  auto add = [&](double px, double py)
+  {
+    double x = px;
+    double y = py;
+    box.itransform(x, y);
+    lon.push_back(x);
+    lat.push_back(y);
+  };
+
+  for (int j = 0; -m + j * step < H + m + step; j++)
+    for (int i = 0; -m + i * step < W + m + step; i++)
+      add(std::min(-m + i * step, W + m), std::min(-m + j * step, H + m));
+
+  // Denser along the edges
+  const double edgestep = 4;
+  for (int i = 0; -m + i * edgestep <= W + m; i++)
+  {
+    add(-m + i * edgestep, -m);
+    add(-m + i * edgestep, H + m);
+  }
+  for (int j = 0; -m + j * edgestep <= H + m; j++)
+  {
+    add(-m, -m + j * edgestep);
+    add(W + m, -m + j * edgestep);
+  }
+
+  const Fmi::CoordinateTransformation toLonLat(crs, Fmi::SpatialReference("WGS84"));
+  toLonLat.transform(lon, lat);
+  return {lon, lat};
+}
+
+using TileXY = std::pair<uint32_t, uint32_t>;
+using TileId = std::tuple<int, uint32_t, uint32_t>;
+
+// The tiles covering the points. The zoom level is reduced until at most maxTiles are needed.
+std::set<TileXY> cover_tiles(const std::vector<double>& lon,
+                             const std::vector<double>& lat,
+                             int maxTiles,
+                             int& tilez)
+{
+  while (true)
+  {
+    std::set<TileXY> wanted;
+    for (std::size_t i = 0; i < lon.size(); i++)
+      if (std::isfinite(lon[i]) && std::isfinite(lat[i]))
+        wanted.insert(lonlat_to_tile(lon[i], lat[i], tilez));
+    if (static_cast<int>(wanted.size()) <= maxTiles || tilez == 0)
+      return wanted;
+    --tilez;
+  }
+}
+
+// The clip area of a tile in units of the tile of the work
+Rect clip_area(const TileWork& work, int z, uint32_t x, uint32_t y)
+{
+  const int d = z - work.z;
+  const double n = std::ldexp(1.0, d);
+  const double x0 = x - (static_cast<double>(work.x) * n);
+  const double y0 = y - (static_cast<double>(work.y) * n);
+  return Rect{x0 / n, y0 / n, (x0 + 1) / n, (y0 + 1) / n};
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief Collect the tiles to render
+ *
+ * The wanted tiles are grouped by the most detailed data available. A group
+ * tile is used whole if all the wanted tiles under it are in the group,
+ * otherwise only the areas of the wanted tiles are used, so that detailed
+ * and coarse data never overlap.
+ */
+// ----------------------------------------------------------------------
+
+std::vector<TileWork> collect_tiles(const Renderer& renderer,
+                                    TileStore& tiles,
+                                    const std::string& dataset,
+                                    const DatasetInfo& info,
+                                    const std::set<TileXY>& wanted,
+                                    int tilez,
+                                    const std::set<std::string>& sourceLayers)
+{
+  std::map<TileId, std::vector<TileXY>> groups;
+  std::set<int> levels;
+  for (const auto& [x, y] : wanted)
+  {
+    const int a = available_zoom(info, tilez, x, y);
+    if (a < 0)
+      continue;
+    const int d = tilez - a;
+    groups[TileId{a, x >> d, y >> d}].emplace_back(x, y);
+    levels.insert(a);
+  }
+
+  // Number of wanted tiles under each group tile, to detect mixed resolutions
+  std::map<TileId, std::size_t> footprint;
+  for (const auto& [x, y] : wanted)
+    for (int a : levels)
+      ++footprint[TileId{a, x >> (tilez - a), y >> (tilez - a)}];
+
+  // One request for all tiles from sources such as databases
+  std::vector<TileCoord> coords;
+  for (const auto& item : groups)
+  {
+    const auto [a, gx, gy] = item.first;
+    coords.push_back(TileCoord{static_cast<uint8_t>(a), gx, gy});
+  }
+  tiles.prefetch(dataset, coords);
+
+  const std::size_t layerHash = boost::hash_range(sourceLayers.begin(), sourceLayers.end());
+
+  std::vector<TileWork> works;
+  for (const auto& [id, children] : groups)
+  {
+    const auto [a, gx, gy] = id;
+    auto tile = tiles.getTile(dataset, static_cast<uint8_t>(a), gx, gy);
+    if (!tile)
+      continue;
+
+    TileWork work;
+    work.tile = renderer.decode(*tile, &sourceLayers, layerHash);
+    work.z = tile->z;
+    work.x = tile->x;
+    work.y = tile->y;
+
+    if (footprint[id] == children.size())
+      work.clips.push_back(clip_area(work, a, gx, gy));
+    else
+      for (const auto& [cx, cy] : children)
+        work.clips.push_back(clip_area(work, tilez, cx, cy));
+
+    works.push_back(std::move(work));
+  }
+  return works;
+}
+
+// Is the style layer rendered at the zoom level with the options?
+bool is_rendered(const StyleLayer& layer, double zoom, const MapOptions& options)
+{
+  if (!layer.isVisibleAt(zoom))
+    return false;
+  if (!options.include.empty() && !matches(layer.id, options.include))
+    return false;
+  return !matches(layer.id, options.exclude);
+}
+
+using SvgAttributes = std::vector<std::pair<std::string, std::string>>;
+
+// Key of the paint attributes for grouping paths
+std::string paint_key(const SvgAttributes& attrs)
+{
+  std::string key;
+  for (const auto& [n, v] : attrs)
+    key += n + '=' + v + ';';
+  return key;
+}
+
+// Append the paths of the paint groups to the scene
+void add_paths(const StyleLayer& layer, Groups& groups, Scene& scene)
+{
+  for (auto& [attrs, path] : groups.groups)
+  {
+    if (path.empty())
+      continue;
+    SceneElement e{"path", layer.id, {{"d", std::move(path)}}, ""};
+    e.attributes.insert(e.attributes.end(), attrs.begin(), attrs.end());
+    scene.elements.push_back(std::move(e));
+  }
+}
+
+void render_background(const StyleLayer& layer, double zoom, Scene& scene)
+{
+  const Context zctx{zoom, nullptr, nullptr};
+  Property color(layer.paintProperty("background-color"), zctx, Value(std::string("#000000")));
+  Property opacity(layer.paintProperty("background-opacity"), zctx, Value(1.0));
+  SceneElement rect{"rect",
+                    layer.id,
+                    {{"x", "0"},
+                     {"y", "0"},
+                     {"width", number(static_cast<double>(scene.width))},
+                     {"height", number(static_cast<double>(scene.height))}},
+                    ""};
+  if (add_color(rect.attributes, "fill", color(zctx), opacity.number(zctx)))
+    scene.elements.push_back(std::move(rect));
+}
+
+void render_fill(const StyleLayer& layer,
+                 const std::vector<TileWork>& works,
+                 double zoom,
+                 const PathBuilder& builder,
+                 Scene& scene)
+{
+  if (layer.paintProperty("fill-pattern") != nullptr)
+    return;
+
+  const Context zctx{zoom, nullptr, nullptr};
+  Property color(layer.paintProperty("fill-color"), zctx, Value(std::string("#000000")));
+  Property opacity(layer.paintProperty("fill-opacity"), zctx, Value(1.0));
+
+  Groups groups;
+  for (const auto& work : works)
+  {
+    const auto* mvtlayer = work.tile->layer(layer.sourceLayer);
+    if (mvtlayer == nullptr)
+      continue;
+    for (const auto& feature : mvtlayer->features)
+    {
+      if (feature.type != Mvt::GeomType::Polygon)
+        continue;
+      const Context ctx{zoom, mvtlayer, &feature};
+      if (layer.filter && !layer.filter->evaluate(ctx).truthy())
+        continue;
+      SvgAttributes attrs;
+      if (!add_color(attrs, "fill", color(ctx), opacity.number(ctx)))
+        continue;
+      builder.add(feature, work, mvtlayer->extent, true, groups.path(paint_key(attrs), attrs));
+    }
+  }
+  add_paths(layer, groups, scene);
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief The paint and layout properties of a line layer
+ */
+// ----------------------------------------------------------------------
+
+struct LineProperties
+{
+  LineProperties(const StyleLayer& layer, const Context& zctx)
+      : color(layer.paintProperty("line-color"), zctx, Value(std::string("#000000"))),
+        width(layer.paintProperty("line-width"), zctx, Value(1.0)),
+        gap(layer.paintProperty("line-gap-width"), zctx, Value(0.0)),
+        opacity(layer.paintProperty("line-opacity"), zctx, Value(1.0)),
+        dash(layer.paintProperty("line-dasharray"), zctx, Value()),
+        cap(layer.layoutProperty("line-cap"), zctx, Value(std::string("butt"))),
+        join(layer.layoutProperty("line-join"), zctx, Value(std::string("miter")))
+  {
+  }
+
+  // SVG attributes of a feature, empty if the line is invisible
+  std::optional<SvgAttributes> attributes(const Context& ctx) const
+  {
+    const double w = width.number(ctx);
+    const double g = gap.number(ctx);
+    const double total = (g > 0 ? g + 2 * w : w);
+    if (total <= 0)
+      return {};
+    SvgAttributes attrs{{"fill", "none"}};
+    if (!add_color(attrs, "stroke", color(ctx), opacity.number(ctx)))
+      return {};
+    attrs.emplace_back("stroke-width", number(total, 2));
+    const auto c = cap(ctx).toString();
+    if (c != "butt")
+      attrs.emplace_back("stroke-linecap", c);
+    const auto j = join(ctx).toString();
+    if (j != "miter")
+      attrs.emplace_back("stroke-linejoin", j == "bevel" ? "bevel" : "round");
+    auto d = dash(ctx);
+    if (d.type == Value::Type::Array && !d.array.empty())
+      attrs.emplace_back("stroke-dasharray", dasharray(d, w));
+    return attrs;
+  }
+
+  // Dash lengths are in line widths
+  static std::string dasharray(const Value& dash, double width)
+  {
+    std::string s;
+    for (const auto& v : dash.array)
+      s += (s.empty() ? "" : ",") + number(v.toNumber().value_or(0) * std::max(width, 1.0), 2);
+    return s;
+  }
+
+  Property color;
+  Property width;
+  Property gap;
+  Property opacity;
+  Property dash;
+  Property cap;
+  Property join;
+};
+
+void render_line(const StyleLayer& layer,
+                 const std::vector<TileWork>& works,
+                 double zoom,
+                 const PathBuilder& builder,
+                 Scene& scene)
+{
+  if (layer.paintProperty("line-pattern") != nullptr)
+    return;
+
+  const LineProperties props(layer, Context{zoom, nullptr, nullptr});
+
+  Groups groups;
+  for (const auto& work : works)
+  {
+    const auto* mvtlayer = work.tile->layer(layer.sourceLayer);
+    if (mvtlayer == nullptr)
+      continue;
+    for (const auto& feature : mvtlayer->features)
+    {
+      if (feature.type != Mvt::GeomType::LineString && feature.type != Mvt::GeomType::Polygon)
+        continue;
+      const Context ctx{zoom, mvtlayer, &feature};
+      if (layer.filter && !layer.filter->evaluate(ctx).truthy())
+        continue;
+      auto attrs = props.attributes(ctx);
+      if (attrs)
+        builder.add(feature, work, mvtlayer->extent, false, groups.path(paint_key(*attrs), *attrs));
+    }
+  }
+  add_paths(layer, groups, scene);
+}
+
+// ----------------------------------------------------------------------
+/*!
+ * \brief Render the style layers, labels last on top of everything else
+ */
+// ----------------------------------------------------------------------
+
+void render_layers(const Style& style,
+                   const std::vector<TileWork>& works,
+                   double zoom,
+                   const MapOptions& options,
+                   const Projector& projector,
+                   Scene& scene)
+{
+  const double pm = options.margin + 4;
+  const PathBuilder builder(
+      projector,
+      Rect{-pm, -pm, static_cast<double>(scene.width) + pm, static_cast<double>(scene.height) + pm},
+      options.precision,
+      !projector.isWebMercator());
+
+  std::vector<Label> labels;
+  const auto& layers = style.layers();
+  for (std::size_t li = 0; li < layers.size(); li++)
+  {
+    const auto& layer = layers[li];
+    if (!is_rendered(layer, zoom, options))
+      continue;
+
+    if (layer.type == LayerType::Background)
+      render_background(layer, zoom, scene);
+    else if (layer.type == LayerType::Symbol)
+    {
+      if (options.labels)
+        collect_labels(layer, static_cast<int>(li), works, zoom, builder, options, labels);
+    }
+    else if (layer.type == LayerType::Fill)
+      render_fill(layer, works, zoom, builder, scene);
+    else
+      render_line(layer, works, zoom, builder, scene);
+  }
+
+  place_labels(labels, scene);
 }
 
 }  // namespace
@@ -1182,330 +1767,35 @@ ScenePtr Renderer::render(const MapOptions& theOptions,
     auto scene = std::make_shared<Scene>();
     scene->width = theBox.width();
     scene->height = theBox.height();
+    scene->attribution = dataset_attribution(*info);
 
-    // Attribution from the metadata
-    {
-      Json::Value meta;
-      Json::CharReaderBuilder builder;
-      std::string errors;
-      std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-      const auto& m = info->metadata;
-      if (!m.empty() && reader->parse(m.data(), m.data() + m.size(), &meta, &errors))
-        scene->attribution = strip_tags(meta.get("attribution", "").asString());
-      if (scene->attribution.empty())
-        scene->attribution = "© OpenStreetMap";
-    }
-
-    const double W = static_cast<double>(scene->width);
-    const double H = static_cast<double>(scene->height);
-    if (W < 1 || H < 1)
+    if (scene->width < 1 || scene->height < 1)
       return scene;
-
-    // Transformations from the image CRS
-
-    const Fmi::CoordinateTransformation toLonLat(theCRS, Fmi::SpatialReference("WGS84"));
-    std::optional<Fmi::CoordinateTransformation> toMercator;
-    auto epsg = theCRS.getEPSG();
-    if (!epsg || *epsg != 3857)
-      toMercator.emplace(theCRS, Fmi::SpatialReference("EPSG:3857"));
-
-    auto pixel_to_crs = [&](double& x, double& y) { theBox.itransform(x, y); };
 
     // 1. Style zoom from the resolution near the center of the image
 
-    double zoom = 0;
-    if (theOptions.zoom)
-      zoom = *theOptions.zoom;
-    else
-    {
-      std::optional<double> resolution;
-      for (double f : {0.5, 0.25, 0.75, 0.1, 0.9})
-      {
-        for (double g : {0.5, 0.25, 0.75, 0.1, 0.9})
-        {
-          std::vector<double> x{W * f, W * f + 1, W * f};
-          std::vector<double> y{H * g, H * g, H * g + 1};
-          for (std::size_t i = 0; i < 3; i++)
-            pixel_to_crs(x[i], y[i]);
-          if (toMercator)
-            toMercator->transform(x, y);
-          const double d1 = std::hypot(x[1] - x[0], y[1] - y[0]);
-          const double d2 = std::hypot(x[2] - x[0], y[2] - y[0]);
-          if (std::isfinite(d1) && std::isfinite(d2) && d1 > 0 && d2 > 0)
-          {
-            resolution = std::sqrt(d1 * d2);
-            break;
-          }
-        }
-        if (resolution)
-          break;
-      }
-      if (!resolution)
-        return scene;
-      zoom = std::log2(2 * kHalf / (kTileSize * *resolution)) + theOptions.zoomOffset;
-    }
-    zoom = std::clamp(zoom, 0.0, 24.0);
-    scene->zoom = zoom;
+    auto zoom = style_zoom(theOptions, theCRS, theBox);
+    if (!zoom)
+      return scene;
+    scene->zoom = *zoom;
 
     // 2. Tiles covering the image
 
-    int tilez = std::clamp(static_cast<int>(std::floor(zoom)), 0, static_cast<int>(info->maxzoom));
-
-    std::vector<double> lon;
-    std::vector<double> lat;
-    {
-      const double step = 16;
-      const double m = theOptions.margin;
-      auto add = [&](double px, double py)
-      {
-        double x = px;
-        double y = py;
-        pixel_to_crs(x, y);
-        lon.push_back(x);
-        lat.push_back(y);
-      };
-      for (double py = -m; py < H + m + step; py += step)
-        for (double px = -m; px < W + m + step; px += step)
-          add(std::min(px, W + m), std::min(py, H + m));
-      // Denser along the edges
-      for (double p = -m; p <= W + m; p += 4)
-      {
-        add(p, -m);
-        add(p, H + m);
-      }
-      for (double p = -m; p <= H + m; p += 4)
-      {
-        add(-m, p);
-        add(W + m, p);
-      }
-      toLonLat.transform(lon, lat);
-    }
-
-    std::set<std::pair<uint32_t, uint32_t>> wanted;
-    while (true)
-    {
-      wanted.clear();
-      for (std::size_t i = 0; i < lon.size(); i++)
-        if (std::isfinite(lon[i]) && std::isfinite(lat[i]))
-          wanted.insert(lonlat_to_tile(lon[i], lat[i], tilez));
-      if (static_cast<int>(wanted.size()) <= theOptions.maxTiles || tilez == 0)
-        break;
-      --tilez;
-    }
+    int tilez = std::clamp(static_cast<int>(std::floor(*zoom)), 0, static_cast<int>(info->maxzoom));
+    const auto [lon, lat] = sample_image(theCRS, theBox, theOptions.margin);
+    const auto wanted = cover_tiles(lon, lat, theOptions.maxTiles, tilez);
     scene->tileZoom = tilez;
 
     // 3. Group the tiles by the most detailed data available
 
-    using TileId = std::tuple<int, uint32_t, uint32_t>;
-    std::map<TileId, std::vector<std::pair<uint32_t, uint32_t>>> groups;
-    std::set<int> levels;
-    for (const auto& [x, y] : wanted)
-    {
-      const int a = available_zoom(*info, tilez, x, y);
-      if (a < 0)
-        continue;
-      const int d = tilez - a;
-      groups[TileId{a, x >> d, y >> d}].emplace_back(x, y);
-      levels.insert(a);
-    }
-
-    // Number of wanted tiles under each group tile, to detect mixed resolutions
-    std::map<TileId, std::size_t> footprint;
-    for (const auto& [x, y] : wanted)
-      for (int a : levels)
-        ++footprint[TileId{a, x >> (tilez - a), y >> (tilez - a)}];
-
-    const auto& sourceLayers = style->sourceLayers();
-    const std::size_t layerHash = boost::hash_range(sourceLayers.begin(), sourceLayers.end());
-
-    // One request for all tiles from sources such as databases
-    std::vector<TileCoord> coords;
-    for (const auto& item : groups)
-    {
-      const auto [a, gx, gy] = item.first;
-      coords.push_back(TileCoord{static_cast<uint8_t>(a), gx, gy});
-    }
-    itsTiles.prefetch(theOptions.dataset, coords);
-
-    std::vector<TileWork> works;
-    for (const auto& [id, children] : groups)
-    {
-      const auto [a, gx, gy] = id;
-      auto tile = itsTiles.getTile(theOptions.dataset, static_cast<uint8_t>(a), gx, gy);
-      if (!tile)
-        continue;
-
-      TileWork work;
-      work.tile = decode(*tile, &sourceLayers, layerHash);
-      work.z = tile->z;
-      work.x = tile->x;
-      work.y = tile->y;
-
-      // Clip areas in units of the returned tile
-      auto add_clip = [&](int z, uint32_t x, uint32_t y)
-      {
-        const int d = z - work.z;
-        const double n = std::ldexp(1.0, d);
-        const double x0 = x - (static_cast<double>(work.x) * n);
-        const double y0 = y - (static_cast<double>(work.y) * n);
-        work.clips.push_back(Rect{x0 / n, y0 / n, (x0 + 1) / n, (y0 + 1) / n});
-      };
-
-      if (footprint[id] == children.size())
-        add_clip(a, gx, gy);
-      else
-        for (const auto& [cx, cy] : children)
-          add_clip(tilez, cx, cy);
-
-      works.push_back(std::move(work));
-    }
+    const auto works = collect_tiles(
+        *this, itsTiles, theOptions.dataset, *info, wanted, tilez, style->sourceLayers());
     scene->tiles = works.size();
 
-    // 4. Render the layers
+    // 4. Render the layers, 5. labels on top
 
     const Projector projector(theCRS, theBox);
-    const double pm = theOptions.margin + 4;
-    const PathBuilder builder(
-        projector, Rect{-pm, -pm, W + pm, H + pm}, theOptions.precision, !projector.isWebMercator());
-    const Context zctx{zoom, nullptr, nullptr};
-
-    std::vector<Label> labels;
-    const auto& layers = style->layers();
-    for (std::size_t li = 0; li < layers.size(); li++)
-    {
-      const auto& layer = layers[li];
-      if (!layer.isVisibleAt(zoom))
-        continue;
-      if (!theOptions.include.empty() && !matches(layer.id, theOptions.include))
-        continue;
-      if (matches(layer.id, theOptions.exclude))
-        continue;
-
-      if (layer.type == LayerType::Background)
-      {
-        Property color(layer.paintProperty("background-color"), zctx, Value(std::string("#000000")));
-        Property opacity(layer.paintProperty("background-opacity"), zctx, Value(1.0));
-        SceneElement rect{"rect",
-                          layer.id,
-                          {{"x", "0"}, {"y", "0"}, {"width", number(W)}, {"height", number(H)}},
-                          ""};
-        if (add_color(rect.attributes, "fill", color(zctx), opacity.number(zctx)))
-          scene->elements.push_back(std::move(rect));
-        continue;
-      }
-
-      if (layer.type == LayerType::Symbol)
-      {
-        if (theOptions.labels)
-          collect_labels(layer, static_cast<int>(li), works, zoom, builder, theOptions, labels);
-        continue;
-      }
-
-      const bool fill = (layer.type == LayerType::Fill);
-      Groups groups_out;
-
-      if (fill)
-      {
-        Property color(layer.paintProperty("fill-color"), zctx, Value(std::string("#000000")));
-        Property opacity(layer.paintProperty("fill-opacity"), zctx, Value(1.0));
-        if (layer.paintProperty("fill-pattern") != nullptr)
-          continue;
-
-        for (const auto& work : works)
-        {
-          const auto* mvtlayer = work.tile->layer(layer.sourceLayer);
-          if (mvtlayer == nullptr)
-            continue;
-          for (const auto& feature : mvtlayer->features)
-          {
-            if (feature.type != Mvt::GeomType::Polygon)
-              continue;
-            const Context ctx{zoom, mvtlayer, &feature};
-            if (layer.filter && !layer.filter->evaluate(ctx).truthy())
-              continue;
-            std::vector<std::pair<std::string, std::string>> attrs;
-            if (!add_color(attrs, "fill", color(ctx), opacity.number(ctx)))
-              continue;
-            std::string key;
-            for (const auto& [n, v] : attrs)
-              key += n + '=' + v + ';';
-            auto& path = groups_out.path(key, attrs);
-            builder.add(feature, work, mvtlayer->extent, true, path);
-          }
-        }
-      }
-      else
-      {
-        Property color(layer.paintProperty("line-color"), zctx, Value(std::string("#000000")));
-        Property width(layer.paintProperty("line-width"), zctx, Value(1.0));
-        Property gap(layer.paintProperty("line-gap-width"), zctx, Value(0.0));
-        Property opacity(layer.paintProperty("line-opacity"), zctx, Value(1.0));
-        Property dash(layer.paintProperty("line-dasharray"), zctx, Value());
-        Property cap(layer.layoutProperty("line-cap"), zctx, Value(std::string("butt")));
-        Property join(layer.layoutProperty("line-join"), zctx, Value(std::string("miter")));
-        if (layer.paintProperty("line-pattern") != nullptr)
-          continue;
-
-        for (const auto& work : works)
-        {
-          const auto* mvtlayer = work.tile->layer(layer.sourceLayer);
-          if (mvtlayer == nullptr)
-            continue;
-          for (const auto& feature : mvtlayer->features)
-          {
-            if (feature.type != Mvt::GeomType::LineString &&
-                feature.type != Mvt::GeomType::Polygon)
-              continue;
-            const Context ctx{zoom, mvtlayer, &feature};
-            if (layer.filter && !layer.filter->evaluate(ctx).truthy())
-              continue;
-
-            const double w = width.number(ctx);
-            const double g = gap.number(ctx);
-            const double total = (g > 0 ? g + 2 * w : w);
-            if (total <= 0)
-              continue;
-            std::vector<std::pair<std::string, std::string>> attrs{{"fill", "none"}};
-            if (!add_color(attrs, "stroke", color(ctx), opacity.number(ctx)))
-              continue;
-            attrs.emplace_back("stroke-width", number(total, 2));
-            const auto c = cap(ctx).toString();
-            if (c != "butt")
-              attrs.emplace_back("stroke-linecap", c);
-            const auto j = join(ctx).toString();
-            if (j != "miter")
-              attrs.emplace_back("stroke-linejoin", j == "bevel" ? "bevel" : "round");
-            auto d = dash(ctx);
-            if (d.type == Value::Type::Array && !d.array.empty())
-            {
-              std::string s;
-              for (const auto& v : d.array)
-                s += (s.empty() ? "" : ",") + number(v.toNumber().value_or(0) * std::max(w, 1.0), 2);
-              attrs.emplace_back("stroke-dasharray", s);
-            }
-
-            std::string key;
-            for (const auto& [n, v] : attrs)
-              key += n + '=' + v + ';';
-            auto& path = groups_out.path(key, attrs);
-            builder.add(feature, work, mvtlayer->extent, false, path);
-          }
-        }
-      }
-
-      for (auto& [attrs, path] : groups_out.groups)
-      {
-        if (path.empty())
-          continue;
-        SceneElement e{"path", layer.id, {{"d", std::move(path)}}, ""};
-        e.attributes.insert(e.attributes.end(), attrs.begin(), attrs.end());
-        scene->elements.push_back(std::move(e));
-      }
-    }
-
-    // 5. Labels on top
-
-    place_labels(labels, *scene);
+    render_layers(*style, works, *zoom, theOptions, projector, *scene);
 
     return scene;
   }
