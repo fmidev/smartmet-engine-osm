@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.10.26
+Version: 26.10.27
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -117,6 +117,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Tue Oct 27 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.27-1.fmi
+- Fixed smartmet-osm-pgload build on RHEL9: exec(query, params) requires libpqxx 7.10, older versions use exec_params
+
 * Mon Oct 26 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.26-1.fmi
 - Rendering, style expressions, colour parsing, case conversion, tile store scans, configuration and overzooming split into smaller functions
 - No use of a moved-from vector when splitting projected lines

@@ -61,15 +61,15 @@ std::string source_name(const std::string& stem)
   return stem.substr(0, pos);
 }
 
-// Statement with parameters: exec_params is deprecated since libpqxx 7.9,
-// which RHEL 8 does not have
+// Statement with parameters: exec(query, params) appeared in libpqxx 7.10,
+// which RHEL 8 and RHEL 9 do not have. exec_params is deprecated in newer versions.
 template <typename... Args>
 pqxx::result exec(pqxx::transaction_base& tx, const std::string& sql, Args&&... args)
 {
-#if PQXX_VERSION_MAJOR > 7 || (PQXX_VERSION_MAJOR == 7 && PQXX_VERSION_MINOR >= 9)
+#if PQXX_VERSION_MAJOR > 7 || (PQXX_VERSION_MAJOR == 7 && PQXX_VERSION_MINOR >= 10)
   return tx.exec(sql, pqxx::params{std::forward<Args>(args)...});
 #else
-  return exec(tx, sql, std::forward<Args>(args)...);
+  return tx.exec_params(sql, std::forward<Args>(args)...);
 #endif
 }
 
