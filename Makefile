@@ -4,7 +4,7 @@ INCDIR = smartmet/engines/$(SUBNAME)
 
 REQUIRES = configpp fmt gdal jsoncpp libpqxx
 
-include $(shell echo $${PREFIX-/usr})/share/smartmet/devel/makefile.inc
+include $(or $(PREFIX),$(shell smartbuildcfg --prefix))/share/smartmet/devel/makefile.inc
 
 DEFINES = -DUNIX -D_REENTRANT
 
