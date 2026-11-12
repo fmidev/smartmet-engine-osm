@@ -8,10 +8,8 @@
  */
 // ======================================================================
 
-#include "../osm/Config.h"
 #include "../osm/PMTilesReader.h"
 #include "../osm/TileSource.h"
-#include "../osm/TileStore.h"
 #include "Config.h"
 #include "TileStore.h"
 

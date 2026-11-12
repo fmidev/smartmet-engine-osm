@@ -13,7 +13,6 @@
  */
 // ======================================================================
 
-#include "../osm/PMTilesReader.h"
 #include "PMTilesReader.h"
 
 #define BOOST_TEST_MODULE PMTilesReaderTest
