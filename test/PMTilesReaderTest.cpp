@@ -13,14 +13,19 @@
  */
 // ======================================================================
 
+#include "../osm/PMTilesReader.h"
 #include "PMTilesReader.h"
+
 #define BOOST_TEST_MODULE PMTilesReaderTest
 #include <boost/test/included/unit_test.hpp>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace SmartMet::Engine::OSM;

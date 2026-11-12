@@ -11,6 +11,8 @@
 #pragma once
 
 #include "Expression.h"
+#include <json/value.h>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <memory>

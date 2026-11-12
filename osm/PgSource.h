@@ -28,18 +28,8 @@
 #include "TileSource.h"
 #include <cstdint>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <string>
 #include <vector>
-
-namespace Fmi
-{
-namespace Database
-{
-class PostgreSQLConnection;
-}  // namespace Database
-}  // namespace Fmi
 
 namespace SmartMet
 {

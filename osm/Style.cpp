@@ -5,12 +5,14 @@
 // ======================================================================
 
 #include "Style.h"
-#include <fmt/format.h>
+#include <json/reader.h>
 #include <macgyver/Exception.h>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
-#include <iostream>
+#include <system_error>
+#include <utility>
 
 namespace SmartMet
 {

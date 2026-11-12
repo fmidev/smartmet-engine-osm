@@ -32,11 +32,10 @@
 
 #pragma once
 
-#include "Config.h"
-#include "Renderer.h"
 #include "Scene.h"
 #include "Style.h"
 #include "TileStore.h"
+#include <macgyver/CacheStats.h>
 #include <spine/SmartMetEngine.h>
 #include <condition_variable>
 #include <cstdint>
@@ -46,6 +45,17 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace Fmi
+{
+class Box;
+class SpatialReference;
+}  // namespace Fmi
+namespace SmartMet::Engine::OSM
+{
+class Config;
+class Renderer;
+}  // namespace SmartMet::Engine::OSM
 
 namespace SmartMet
 {

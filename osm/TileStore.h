@@ -27,11 +27,11 @@
 
 #pragma once
 
-#include "Config.h"
 #include "PMTilesReader.h"
-#include "PgSource.h"
+#include "TileSource.h"
 #include <macgyver/Cache.h>
 #include <macgyver/CacheStats.h>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -40,7 +40,15 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
+
+namespace SmartMet::Engine::OSM
+{
+class Config;
+class PgDatabase;
+class PgSource;
+}  // namespace SmartMet::Engine::OSM
 
 namespace SmartMet
 {

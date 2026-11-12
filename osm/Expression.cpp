@@ -8,11 +8,15 @@
 #include <fmt/format.h>
 #include <macgyver/Exception.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <set>
+#include <variant>
 
 namespace SmartMet
 {

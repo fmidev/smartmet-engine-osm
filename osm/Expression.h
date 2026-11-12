@@ -16,9 +16,9 @@
 
 #include "MvtTile.h"
 #include <json/json.h>
-#include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace SmartMet

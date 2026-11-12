@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <utility>
+#include <zconf.h>
 #include <zlib.h>
 #include <zstd.h>
 

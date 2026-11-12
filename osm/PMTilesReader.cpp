@@ -5,17 +5,18 @@
 // ======================================================================
 
 #include "PMTilesReader.h"
-#include <macgyver/Exception.h>
-#include <fcntl.h>
 #include <linux/magic.h>
+#include <macgyver/Exception.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
-#include <unistd.h>
+#include <sys/statfs.h>
+#include <sys/types.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace SmartMet
 {

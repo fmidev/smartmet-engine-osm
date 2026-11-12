@@ -7,9 +7,10 @@
 #pragma once
 
 #include "PMTilesReader.h"
+#include <cstddef>
 #include <filesystem>
-#include <optional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 

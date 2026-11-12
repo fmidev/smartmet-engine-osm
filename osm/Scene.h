@@ -10,7 +10,8 @@
 
 #pragma once
 
-#include <cstdint>
+#include <cstddef>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>

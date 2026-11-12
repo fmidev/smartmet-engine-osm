@@ -5,13 +5,18 @@
 // ======================================================================
 
 #include "TileStore.h"
+#include "Config.h"
+#include "PgSource.h"
 #include <fmt/format.h>
 #include <macgyver/Exception.h>
 #include <sys/stat.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <ctime>
+#include <exception>
 #include <iostream>
+#include <system_error>
 
 namespace SmartMet
 {

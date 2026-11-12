@@ -5,6 +5,9 @@
 // ======================================================================
 
 #include "Clip.h"
+#include <algorithm>
+#include <cstddef>
+#include <utility>
 
 namespace SmartMet
 {

@@ -5,9 +5,20 @@
 // ======================================================================
 
 #include "Engine.h"
+#include "Config.h"
+#include "Renderer.h"
 #include <fmt/format.h>
 #include <macgyver/Exception.h>
+#include <chrono>
+#include <filesystem>
 #include <iostream>
+#include <utility>
+
+namespace Fmi
+{
+class Box;
+class SpatialReference;
+}  // namespace Fmi
 
 namespace SmartMet
 {

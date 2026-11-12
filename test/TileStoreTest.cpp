@@ -8,16 +8,25 @@
  */
 // ======================================================================
 
+#include "../osm/Config.h"
+#include "../osm/PMTilesReader.h"
+#include "../osm/TileSource.h"
+#include "../osm/TileStore.h"
 #include "Config.h"
 #include "TileStore.h"
+
 #define BOOST_TEST_MODULE TileStoreTest
 #include <boost/test/included/unit_test.hpp>
-#include <filesystem>
+#include <macgyver/CacheStats.h>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 using namespace SmartMet::Engine::OSM;
 

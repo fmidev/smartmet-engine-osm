@@ -9,7 +9,7 @@
 #include <macgyver/Exception.h>
 #include <cmath>
 #include <cstring>
-#include <map>
+#include <iterator>
 #include <optional>
 
 namespace SmartMet

@@ -8,7 +8,11 @@
 #include <fmt/format.h>
 #include <macgyver/Exception.h>
 #include <macgyver/PostgreSQLConnection.h>
+#include <cstddef>
 #include <map>
+#include <mutex>
+#include <optional>
+#include <pqxx/pqxx>
 #include <utility>
 
 namespace SmartMet

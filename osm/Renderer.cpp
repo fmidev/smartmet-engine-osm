@@ -22,19 +22,29 @@
 
 #include "Renderer.h"
 #include "Clip.h"
+#include "Expression.h"
+#include "PMTilesReader.h"
+#include "Style.h"
+#include "TileSource.h"
+#include "TileStore.h"
 #include <boost/functional/hash.hpp>
 #include <fmt/format.h>
 #include <gis/Box.h>
 #include <gis/CoordinateTransformation.h>
 #include <gis/SpatialReference.h>
+#include <json/reader.h>
 #include <macgyver/Exception.h>
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
-#include <limits>
+#include <initializer_list>
 #include <map>
+#include <memory>
 #include <set>
 #include <tuple>
+#include <variant>
+#include <vector>
 
 namespace SmartMet
 {

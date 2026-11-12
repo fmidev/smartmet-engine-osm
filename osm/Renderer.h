@@ -8,11 +8,22 @@
 
 #include "MvtTile.h"
 #include "Scene.h"
-#include "Style.h"
-#include "TileStore.h"
 #include <macgyver/Cache.h>
+#include <macgyver/CacheStats.h>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
+
+namespace SmartMet::Engine::OSM
+{
+class StyleStore;
+class TileStore;
+struct Tile;
+}  // namespace SmartMet::Engine::OSM
 
 namespace Fmi
 {

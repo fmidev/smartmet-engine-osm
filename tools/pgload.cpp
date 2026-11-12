@@ -17,11 +17,20 @@
 #include "../osm/PMTilesReader.h"
 #include <boost/program_options.hpp>
 #include <fmt/format.h>
+#include <cstddef>
+#include <cstdint>
 #include <ctime>
+#include <exception>
+#include <filesystem>
+#include <functional>
 #include <iostream>
+#include <optional>
 #include <pqxx/pqxx>
-#include <set>
+#include <stdexcept>
+#include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace po = boost::program_options;
 using SmartMet::Engine::OSM::Entry;
