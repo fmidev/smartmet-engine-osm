@@ -3,7 +3,7 @@
 %define SPECNAME smartmet-engine-%{DIRNAME}
 Summary: SmartMet OSM engine
 Name: %{SPECNAME}
-Version: 26.10.27
+Version: 26.11.13
 Release: 1%{?dist}.fmi
 License: MIT
 Group: SmartMet/Engines
@@ -117,6 +117,11 @@ rm -rf $RPM_BUILD_ROOT
 %{_includedir}/smartmet/engines/%{DIRNAME}/*.h
 
 %changelog
+* Fri Nov 13 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.11.13-1.fmi
+- Include cleanup: headers include what they use and prefer forward declarations,
+  unnecessary includes removed. No functional changes, but code using these headers may
+  need to add includes it used to get indirectly
+
 * Tue Oct 27 2026 Mika Heiskanen <mika.heiskanen@fmi.fi> - 26.10.27-1.fmi
 - Fixed smartmet-osm-pgload build on RHEL9: exec(query, params) requires libpqxx 7.10, older versions use exec_params
 
